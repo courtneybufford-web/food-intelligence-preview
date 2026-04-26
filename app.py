@@ -4,7 +4,15 @@ import pandas as pd
 import requests
 import re
 import zipfile
+import base64
 from io import BytesIO
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except Exception:
+    Image = None
+    ImageDraw = None
+    ImageFont = None
 
 try:
     from reportlab.lib import colors
@@ -1056,6 +1064,111 @@ def create_nutrition_facts_pdf(recipe_name, panel_text):
     return output.getvalue()
 
 
+
+def create_nutrition_facts_png(panel_text, label_size="2 x 4 in", dpi=300):
+    """Create a print-ready PNG version of the Nutrition Facts panel."""
+    if Image is None:
+        return None
+    size_map = {"2 x 4 in": (2, 4), "3 x 5 in": (3, 5), "4 x 6 in": (4, 6), "5 x 7 in": (5, 7)}
+    width_in, height_in = size_map.get(label_size, (2, 4))
+    width, height = int(width_in * dpi), int(height_in * dpi)
+    margin = max(int(0.07 * dpi), 14)
+    img = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(img)
+
+    def get_font(size, bold=False):
+        paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        ]
+        for fp in paths:
+            try:
+                return ImageFont.truetype(fp, size)
+            except Exception:
+                pass
+        return ImageFont.load_default()
+
+    title_font = get_font(max(int(0.19 * dpi), 24), True)
+    bold_font = get_font(max(int(0.062 * dpi), 10), True)
+    body_font = get_font(max(int(0.054 * dpi), 9), False)
+    small_font = get_font(max(int(0.039 * dpi), 7), False)
+
+    draw.rectangle([margin, margin, width - margin, height - margin], outline="black", width=max(3, int(0.012 * dpi)))
+    x, y = margin + int(0.04 * dpi), margin + int(0.035 * dpi)
+    right = width - margin - int(0.04 * dpi)
+    lines = [line for line in panel_text.splitlines() if line.strip()]
+    title = lines[0] if lines else "Nutrition Facts"
+    draw.text((x, y), title, fill="black", font=title_font)
+    y += (draw.textbbox((x, y), title, font=title_font)[3] - y) + int(0.03 * dpi)
+    draw.line([x, y, right, y], fill="black", width=max(8, int(0.035 * dpi)))
+    y += int(0.035 * dpi)
+
+    for line in lines[1:]:
+        if y > height - margin - int(0.25 * dpi):
+            break
+        clean = line.strip()
+        is_major = any(clean.startswith(prefix) for prefix in ["Calories", "Total Fat", "Cholesterol", "Sodium", "Total Carbohydrate", "Protein"])
+        is_small = clean.startswith("*") or clean.lower().startswith("compliance note")
+        font = small_font if is_small else (bold_font if is_major or clean.lower().startswith("serving") or clean.lower().startswith("amount") or "% daily" in clean.lower() else body_font)
+        indent = int(0.08 * dpi) if clean.startswith(("Saturated", "Trans", "Dietary", "Total Sugars")) else 0
+        if clean.startswith("Includes"):
+            indent = int(0.15 * dpi)
+        draw.text((x + indent, y), clean, fill="black", font=font)
+        y += (draw.textbbox((x + indent, y), clean, font=font)[3] - y) + int(0.014 * dpi)
+        if is_major or clean.startswith("Calories"):
+            draw.line([x, y, right, y], fill="black", width=max(1, int(0.004 * dpi)))
+            y += int(0.01 * dpi)
+
+    output = BytesIO()
+    img.save(output, format="PNG", dpi=(dpi, dpi))
+    return output.getvalue()
+
+
+def image_clipboard_button(png_bytes, key="copy_image"):
+    """Browser-based copy-image button. Works only in browsers that support ClipboardItem."""
+    if not png_bytes:
+        return
+    b64 = base64.b64encode(png_bytes).decode("utf-8")
+    components.html(f"""
+        <button id="{key}" style="background:#0f172a;color:white;border:none;padding:8px 12px;border-radius:6px;font-weight:700;cursor:pointer;">📋 Copy label image</button>
+        <script>
+        const btn = document.getElementById("{key}");
+        btn.onclick = async () => {{
+            try {{
+                const res = await fetch("data:image/png;base64,{b64}");
+                const blob = await res.blob();
+                await navigator.clipboard.write([new ClipboardItem({{"image/png": blob}})]);
+                btn.innerText = "Copied image!";
+                setTimeout(() => btn.innerText = "📋 Copy label image", 1400);
+            }} catch (err) {{
+                btn.innerText = "Copy not supported — use download/right-click";
+                setTimeout(() => btn.innerText = "📋 Copy label image", 2200);
+            }}
+        }};
+        </script>
+    """, height=45)
+
+
+def create_batch_label_zip(saved_recipes, label_size="2 x 4 in", dpi=300):
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
+        for recipe in saved_recipes:
+            name = recipe.get("name", "recipe")
+            panel_text = recipe.get("nutrition_facts_panel") or nutrition_facts_panel_text(
+                name,
+                recipe.get("nutrition_per_serving", {}),
+                recipe.get("servings", 1),
+                recipe.get("serving_weight_g", 0),
+                recipe.get("serving_size_label"),
+            )
+            png = create_nutrition_facts_png(panel_text, label_size, dpi)
+            if png:
+                safe_name = re.sub(r"[^A-Za-z0-9_\-]+", "_", name).strip("_") or "recipe"
+                zf.writestr(f"{safe_name}_nutrition_facts_{label_size.replace(' ', '')}_{dpi}dpi.png", png)
+    return output.getvalue()
+
+
+
 tabs = st.tabs(["Dashboard", "Add Product", "Batch Upload Products", "Batch Upload Recipes", "Recipe Builder", "Saved Recipes"])
 
 with tabs[0]:
@@ -1378,6 +1491,19 @@ with tabs[4]:
         if panel_pdf:
             st.download_button("Download Nutrition Facts Panel PDF", panel_pdf, file_name=f"{(recipe_name or 'recipe').replace(' ', '_')}_nutrition_facts_panel.pdf", mime="application/pdf")
 
+        st.markdown("**Print-ready label image**")
+        label_cols = st.columns([1, 1])
+        label_size = label_cols[0].selectbox("Label size", ["2 x 4 in", "3 x 5 in", "4 x 6 in", "5 x 7 in"], index=0, key="current_label_size")
+        label_dpi = label_cols[1].selectbox("Print DPI", [203, 300, 600], index=1, key="current_label_dpi")
+        label_png = create_nutrition_facts_png(panel_text, label_size, label_dpi)
+        if label_png:
+            st.image(label_png, caption=f"Nutrition Facts label preview — {label_size}, {label_dpi} DPI")
+            image_clipboard_button(label_png, key="copy_current_label_image")
+            st.download_button("Download print-ready PNG label", label_png, file_name=f"{(recipe_name or 'recipe').replace(' ', '_')}_nutrition_facts_{label_dpi}dpi.png", mime="image/png")
+            st.caption("If image copy is blocked by your browser, use Download PNG or right-click/tap-hold the image to copy it.")
+        else:
+            st.warning("PNG label export requires Pillow. Add pillow to requirements.txt.")
+
         st.subheader("Ingredient statement")
         st.text_area("Ingredient list", ingredient_list, height=100)
         st.subheader("Allergen declaration")
@@ -1416,6 +1542,22 @@ with tabs[5]:
                 panel_pdf = create_nutrition_facts_pdf(r.get("name", "Recipe"), panel_text)
                 if panel_pdf:
                     st.download_button("Download Nutrition Facts PDF", panel_pdf, file_name=f"{r['name']}_nutrition_facts.pdf", mime="application/pdf")
+                saved_cols = st.columns([1, 1])
+                saved_size = saved_cols[0].selectbox("Saved label size", ["2 x 4 in", "3 x 5 in", "4 x 6 in", "5 x 7 in"], index=0, key=f"saved_label_size_{r['name']}")
+                saved_dpi = saved_cols[1].selectbox("Saved print DPI", [203, 300, 600], index=1, key=f"saved_label_dpi_{r['name']}")
+                saved_png = create_nutrition_facts_png(panel_text, saved_size, saved_dpi)
+                if saved_png:
+                    st.image(saved_png, caption=f"Print-ready label — {saved_size}, {saved_dpi} DPI")
+                    image_clipboard_button(saved_png, key=f"copy_saved_label_image_{re.sub(r'[^A-Za-z0-9_]+', '_', r['name'])}")
+                    st.download_button("Download print-ready PNG", saved_png, file_name=f"{r['name']}_nutrition_facts_{saved_dpi}dpi.png", mime="image/png")
+
+        st.divider()
+        st.subheader("Batch Print-Ready Label Export")
+        batch_cols = st.columns([1, 1])
+        batch_size = batch_cols[0].selectbox("Batch label size", ["2 x 4 in", "3 x 5 in", "4 x 6 in", "5 x 7 in"], index=0)
+        batch_dpi = batch_cols[1].selectbox("Batch print DPI", [203, 300, 600], index=1)
+        batch_zip = create_batch_label_zip(st.session_state.saved_recipes, batch_size, batch_dpi)
+        st.download_button("Download all saved labels as PNG ZIP", batch_zip, file_name="nutrition_facts_labels_png.zip", mime="application/zip")
 
         st.divider()
         st.subheader("Full Nutrition Export")
