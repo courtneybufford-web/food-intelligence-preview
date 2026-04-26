@@ -1655,25 +1655,22 @@ with tabs[4]:
 
 
         serving_weight_g = round(sum(item_grams(item) for item in updated_items) / max(servings, 1), 2)
-        st.subheader("Nutrition Facts Panel Preview")
-        render_nutrition_facts_panel(recipe_name or "Recipe", per, servings, serving_weight_g, serving_size_label)
         panel_text = nutrition_facts_panel_text(recipe_name or "Recipe", per, servings, serving_weight_g, serving_size_label)
-        panel_pdf = create_nutrition_facts_pdf(recipe_name or "Recipe", panel_text)
-        if panel_pdf:
-            st.download_button("Download Nutrition Facts Panel PDF", panel_pdf, file_name=f"{(recipe_name or 'recipe').replace(' ', '_')}_nutrition_facts_panel.pdf", mime="application/pdf")
 
-        st.markdown("**Print-ready label image**")
+        st.subheader("Nutrition Facts Label")
         label_cols = st.columns([1, 1])
         label_size = label_cols[0].selectbox("Label size", ["2 x 4 in", "3 x 5 in", "4 x 6 in", "5 x 7 in"], index=0, key="current_label_size")
         label_dpi = label_cols[1].selectbox("Print DPI", [203, 300, 600], index=1, key="current_label_dpi")
         label_png = create_nutrition_facts_png(panel_text, label_size, label_dpi)
         if label_png:
-            st.image(label_png, caption=f"Nutrition Facts label preview — {label_size}, {label_dpi} DPI")
+            st.image(label_png, caption=f"Print-ready Nutrition Facts label — {label_size}, {label_dpi} DPI")
             image_clipboard_tools(label_png, key="copy_current_label_image")
             st.download_button("Download print-ready PNG label", label_png, file_name=f"{(recipe_name or 'recipe').replace(' ', '_')}_nutrition_facts_{label_dpi}dpi.png", mime="image/png")
             zpl_text = create_zpl_from_panel(panel_text, label_size, 203)
             st.download_button("Download Zebra/ZPL label file", zpl_text, file_name=f"{(recipe_name or 'recipe').replace(' ', '_')}_nutrition_facts.zpl", mime="text/plain")
-            st.caption("Use Copy label image where supported. If the browser blocks image clipboard access, use Download PNG. ZPL is for Zebra-compatible printers and may need printer-specific adjustment.")
+            if st.toggle("Show raw text version", value=False, key="show_current_raw_panel"):
+                st.text_area("Raw Nutrition Facts text", panel_text, height=360)
+            st.caption("Default view is the print-ready image label. Use the toggle only when you need the raw text version. If image copy is blocked by the browser, use Download PNG.")
         else:
             st.warning("PNG label export requires Pillow. Add pillow to requirements.txt.")
 
@@ -1706,23 +1703,21 @@ with tabs[5]:
                 st.text_area("Label", r["label"], height=220)
                 st.download_button("Download label text", r["label"], file_name=f"{r['name']}_label.txt")
 
-                st.subheader("Nutrition Facts Panel")
+                st.subheader("Nutrition Facts Label")
                 panel_per = r.get("nutrition_per_serving", {})
-                panel_text = r.get("nutrition_facts_panel") or nutrition_facts_panel_text(r.get("name", "Recipe"), panel_per, r.get("servings", 1), r.get("serving_weight_g", 0))
-                render_nutrition_facts_panel(r.get("name", "Recipe"), panel_per, r.get("servings", 1), r.get("serving_weight_g", 0))
-                panel_pdf = create_nutrition_facts_pdf(r.get("name", "Recipe"), panel_text)
-                if panel_pdf:
-                    st.download_button("Download Nutrition Facts PDF", panel_pdf, file_name=f"{r['name']}_nutrition_facts.pdf", mime="application/pdf")
+                panel_text = r.get("nutrition_facts_panel") or nutrition_facts_panel_text(r.get("name", "Recipe"), panel_per, r.get("servings", 1), r.get("serving_weight_g", 0), r.get("serving_size_label", "1 serving"))
                 saved_cols = st.columns([1, 1])
                 saved_size = saved_cols[0].selectbox("Saved label size", ["2 x 4 in", "3 x 5 in", "4 x 6 in", "5 x 7 in"], index=0, key=f"saved_label_size_{r['name']}")
                 saved_dpi = saved_cols[1].selectbox("Saved print DPI", [203, 300, 600], index=1, key=f"saved_label_dpi_{r['name']}")
                 saved_png = create_nutrition_facts_png(panel_text, saved_size, saved_dpi)
                 if saved_png:
-                    st.image(saved_png, caption=f"Print-ready label — {saved_size}, {saved_dpi} DPI")
+                    st.image(saved_png, caption=f"Print-ready Nutrition Facts label — {saved_size}, {saved_dpi} DPI")
                     image_clipboard_tools(saved_png, key=f"copy_saved_label_image_{re.sub(r'[^A-Za-z0-9_]+', '_', r['name'])}")
                     st.download_button("Download print-ready PNG", saved_png, file_name=f"{r['name']}_nutrition_facts_{saved_dpi}dpi.png", mime="image/png")
                     saved_zpl = create_zpl_from_panel(panel_text, saved_size, 203)
                     st.download_button("Download Zebra/ZPL label", saved_zpl, file_name=f"{r['name']}_nutrition_facts.zpl", mime="text/plain")
+                    if st.toggle("Show raw text version", value=False, key=f"show_saved_raw_panel_{r['name']}"):
+                        st.text_area("Raw Nutrition Facts text", panel_text, height=360, key=f"saved_raw_panel_{r['name']}")
 
         st.divider()
         st.subheader("Batch Print-Ready Label Export")
