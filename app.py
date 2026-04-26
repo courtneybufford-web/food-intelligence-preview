@@ -720,31 +720,105 @@ Nutrition: Calories 120 Total Fat 2g Saturated Fat 0.5g Trans Fat 0g Cholesterol
 
 with tabs[2]:
     st.header("USDA FoodData Central Lookup")
-    st.caption("Optional: enter a free USDA FoodData Central API key to search and import nutrient records. Without a key, this tab shows setup guidance.")
-    api_key = st.text_input("USDA API Key", type="password", help="Get a free key from USDA FoodData Central.")
-    query = st.text_input("Search USDA food", placeholder="Example: apple, chicken breast, almond flour")
+    st.caption("Search USDA FoodData Central by ingredient keyword, preview nutrients, and import selected foods into your product list.")
+
+    saved_api_key = ""
+    try:
+        saved_api_key = st.secrets.get("USDA_API_KEY", "")
+    except Exception:
+        saved_api_key = ""
+
+    if saved_api_key:
+        st.success("USDA API key detected from Streamlit Secrets.")
+        api_key = saved_api_key
+    else:
+        st.info("No USDA_API_KEY found in Streamlit Secrets yet. You can paste one below for temporary testing.")
+        api_key = st.text_input("Temporary USDA API Key", type="password", help="For permanent use, add USDA_API_KEY in Streamlit Cloud Secrets.")
+
+    query = st.text_input("Search USDA food by keyword", placeholder="Example: wheat flour, chicken breast, almond flour, milk")
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        page_size = st.slider("Number of results", min_value=5, max_value=25, value=10, step=5)
+    with c2:
+        data_type = st.selectbox("USDA data type", ["All", "Foundation", "SR Legacy", "Survey (FNDDS)", "Branded"], index=0)
+
+    def search_usda_foods_enhanced(query, api_key, page_size=10, data_type="All"):
+        if not requests or not api_key or not query:
+            return []
+        url = "https://api.nal.usda.gov/fdc/v1/foods/search"
+        params = {"api_key": api_key, "query": query, "pageSize": page_size}
+        if data_type != "All":
+            params["dataType"] = [data_type]
+        try:
+            response = requests.get(url, params=params, timeout=20)
+            response.raise_for_status()
+            return response.json().get("foods", [])
+        except Exception as exc:
+            st.warning(f"USDA lookup failed: {exc}")
+            return []
 
     if st.button("Search USDA"):
         if not api_key:
-            st.warning("Add a USDA API key to search live USDA data. The rest of the app still works without it.")
-        elif not query:
+            st.warning("Add your free USDA API key to search live USDA data.")
+        elif not query.strip():
             st.warning("Enter a food search term.")
         else:
-            st.session_state.usda_results = search_usda_foods(query, api_key)
+            with st.spinner("Searching USDA FoodData Central..."):
+                st.session_state.usda_results = search_usda_foods_enhanced(query, api_key, page_size, data_type)
+            if not st.session_state.usda_results:
+                st.info("No USDA results found for that search.")
 
     if st.session_state.usda_results:
+        st.subheader("Search Results")
+        result_rows = []
+        for food in st.session_state.usda_results:
+            result_rows.append({
+                "FDC ID": food.get("fdcId"),
+                "Description": food.get("description"),
+                "Data Type": food.get("dataType"),
+                "Brand": food.get("brandOwner") or food.get("brandName") or "",
+            })
+        st.dataframe(pd.DataFrame(result_rows), use_container_width=True)
+
         options = [f"{food.get('description', 'Food')} — FDC {food.get('fdcId')}" for food in st.session_state.usda_results]
-        selected = st.selectbox("USDA results", options)
+        selected = st.selectbox("Select a USDA food to preview/import", options)
         idx = options.index(selected)
         food = st.session_state.usda_results[idx]
-        st.write(food.get("description"))
+
+        st.write("**Description:**", food.get("description"))
+        st.write("**Data type:**", food.get("dataType", "Unknown"))
+        if food.get("brandOwner") or food.get("brandName"):
+            st.write("**Brand:**", food.get("brandOwner") or food.get("brandName"))
+
         nutrient_preview = pd.DataFrame(food.get("foodNutrients", []))
         if not nutrient_preview.empty:
-            st.dataframe(nutrient_preview[[c for c in ["nutrientName", "value", "unitName"] if c in nutrient_preview.columns]], use_container_width=True)
+            display_cols = [c for c in ["nutrientName", "value", "unitName"] if c in nutrient_preview.columns]
+            st.dataframe(nutrient_preview[display_cols], use_container_width=True)
+
+        imported_product = usda_food_to_product(food)
+        with st.expander("Mapped product nutrition preview"):
+            st.json(imported_product["nutrition"])
+
+        custom_name = st.text_input("Product name to import", value=imported_product["name"])
         if st.button("Import Selected USDA Food as Product"):
-            st.session_state.products.append(usda_food_to_product(food))
+            imported_product["name"] = custom_name.strip() or imported_product["name"]
+            st.session_state.products.append(imported_product)
             st.success("USDA food imported as product.")
             st.rerun()
+
+    with st.expander("How to add your USDA API key permanently"):
+        st.markdown('''
+1. Get a free key from USDA FoodData Central.
+2. Open Streamlit Cloud → your app → Settings → Secrets.
+3. Add this line and save:
+
+```toml
+USDA_API_KEY = "paste_your_key_here"
+```
+
+Then reboot/redeploy the app.
+''')
 
 with tabs[3]:
     st.header("Search Products")
