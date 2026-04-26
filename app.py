@@ -4,6 +4,22 @@ import requests
 import re
 import zipfile
 from io import BytesIO
+
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter, landscape
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+except Exception:
+    colors = None
+    letter = None
+    landscape = None
+    getSampleStyleSheet = None
+    SimpleDocTemplate = None
+    Table = None
+    TableStyle = None
+    Paragraph = None
+    Spacer = None
 try:
     from docx import Document
 except Exception:
@@ -22,6 +38,30 @@ BADGES = {
     "Sample": "SAMPLE",
     "USDA": "USDA",
     "Open Food Facts": "OFF",
+}
+
+COMMON_UNITS = ["g", "kg", "mg", "oz", "lb", "ml", "l", "tsp", "tbsp", "cup", "fl oz", "pint", "quart", "gallon", "each", "piece", "slice", "serving", "portion"]
+
+UNIT_TO_GRAMS = {
+    "g": 1.0,
+    "kg": 1000.0,
+    "mg": 0.001,
+    "oz": 28.3495,
+    "lb": 453.592,
+    "ml": 1.0,
+    "l": 1000.0,
+    "tsp": 4.93,
+    "tbsp": 14.79,
+    "cup": 240.0,
+    "fl oz": 29.57,
+    "pint": 473.0,
+    "quart": 946.0,
+    "gallon": 3785.0,
+    "each": 0.0,
+    "piece": 0.0,
+    "slice": 0.0,
+    "serving": 0.0,
+    "portion": 0.0,
 }
 
 DEFAULT_PRODUCTS = [
@@ -380,14 +420,34 @@ def parse_recipe_batch_uploads(uploaded_files):
     return parsed, errors
 
 
+def item_grams(item):
+    amount = safe_float(item.get("amount", item.get("qty", 1.0)))
+    unit = item.get("unit", "serving")
+    waste_pct = min(max(safe_float(item.get("waste_pct", 0.0)), 0.0), 100.0)
+    grams = amount * UNIT_TO_GRAMS.get(unit, 0.0)
+    usable_grams = grams * (1 - waste_pct / 100.0)
+    return round(usable_grams, 2)
+
+
+def nutrition_factor(item):
+    amount = safe_float(item.get("amount", item.get("qty", 1.0)))
+    waste_pct = min(max(safe_float(item.get("waste_pct", 0.0)), 0.0), 100.0)
+    usable_amount = amount * (1 - waste_pct / 100.0)
+    grams = item_grams(item)
+    serving_note = str(item.get("serving_note", "")).lower()
+    source = str(item.get("source", "")).lower()
+    if grams > 0 and ("per 100 g" in serving_note or source in ["usda", "open food facts"]):
+        return grams / 100.0
+    return usable_amount
+
 def totals(items):
     t = {"calories":0.0,"protein":0.0,"fat":0.0,"carbs":0.0,"salt":0.0}
     allergens = set()
     ingredients = []
     for item in items:
-        qty = float(item.get("qty", 1))
+        factor = nutrition_factor(item)
         for k in t:
-            t[k] += float(item.get(k, 0)) * qty
+            t[k] += float(item.get(k, 0)) * factor
         if item.get("allergens"):
             for a in str(item["allergens"]).split(","):
                 if a.strip():
@@ -569,7 +629,10 @@ def render_search_result(product, index, prefix="search"):
         with action_col:
             if st.button("+ Add to Recipe", key=f"{prefix}_add_{index}_{product['source']}_{product['name']}"):
                 item = dict(product)
-                item["qty"] = 1.0
+                item["amount"] = 1.0
+                item["unit"] = "serving"
+                item["waste_pct"] = 0.0
+                item["grams"] = item_grams(item)
                 st.session_state.recipe_items.append(item)
                 st.success(f"Added {product['name']}")
         with preview_col:
@@ -586,6 +649,164 @@ def render_search_result(product, index, prefix="search"):
                     "carbs_g": product.get("carbs", 0),
                     "salt_g": product.get("salt", 0),
                 })
+
+
+
+
+EXPORT_COLUMNS = [
+    ("Menu Item", "name"),
+    ("Serving Weight (g)", "serving_weight_g"),
+    ("Calories", "calories"),
+    ("Total Fat (g)", "fat"),
+    ("Saturated Fat (g)", "saturated_fat"),
+    ("Trans Fat (g)", "trans_fat"),
+    ("Cholesterol (mg)", "cholesterol"),
+    ("Sodium (mg)", "sodium"),
+    ("Total Carbohydrate (g)", "carbs"),
+    ("Dietary Fiber (g)", "fiber"),
+    ("Total Sugars (g)", "sugars"),
+    ("Added Sugars (g)", "added_sugars"),
+    ("Protein (g)", "protein"),
+    ("Salt (g)", "salt"),
+    ("Ingredients", "ingredients"),
+    ("Allergens", "allergens"),
+]
+
+def recipe_export_record(recipe):
+    items = recipe.get("items", [])
+    total, allergens, ingredients = totals(items)
+    servings = max(safe_float(recipe.get("servings", 1)), 1.0)
+    per = {k: round(v / servings, 3) for k, v in total.items()}
+    serving_weight = round(sum(item_grams(item) for item in items) / servings, 2)
+
+    return {
+        "name": recipe.get("name", ""),
+        "serving_weight_g": serving_weight,
+        "calories": per.get("calories", 0),
+        "fat": per.get("fat", 0),
+        "saturated_fat": per.get("saturated_fat", 0),
+        "trans_fat": per.get("trans_fat", 0),
+        "cholesterol": per.get("cholesterol", 0),
+        "sodium": per.get("sodium", 0),
+        "carbs": per.get("carbs", 0),
+        "fiber": per.get("fiber", 0),
+        "sugars": per.get("sugars", 0),
+        "added_sugars": per.get("added_sugars", 0),
+        "protein": per.get("protein", 0),
+        "salt": per.get("salt", 0),
+        "ingredients": ingredients,
+        "allergens": ", ".join(allergens) if isinstance(allergens, list) else str(allergens),
+    }
+
+def build_nutrition_export_dataframe(recipes):
+    rows = []
+    for recipe in recipes:
+        record = recipe_export_record(recipe)
+        rows.append({label: record.get(key, "") for label, key in EXPORT_COLUMNS})
+    return pd.DataFrame(rows)
+
+def build_allergen_export_dataframe(recipes):
+    rows = []
+    for recipe in recipes:
+        record = recipe_export_record(recipe)
+        rows.append({"Menu Item": record["name"], "Allergens": record["allergens"]})
+    return pd.DataFrame(rows)
+
+def build_ingredient_export_dataframe(recipes):
+    rows = []
+    for recipe in recipes:
+        record = recipe_export_record(recipe)
+        rows.append({"Menu Item": record["name"], "Ingredients": record["ingredients"]})
+    return pd.DataFrame(rows)
+
+def build_diet_export_dataframe(recipes):
+    rows = []
+    for recipe in recipes:
+        allergens = recipe_export_record(recipe)["allergens"].lower()
+        ingredients = recipe_export_record(recipe)["ingredients"].lower()
+        rows.append({
+            "Menu Item": recipe.get("name", ""),
+            "GF": "" if any(x in allergens + " " + ingredients for x in ["wheat", "gluten", "barley", "rye"]) else "x",
+            "Vegan": "" if any(x in allergens + " " + ingredients for x in ["milk", "egg", "fish", "shrimp", "chicken", "beef", "pork", "honey"]) else "x",
+            "Halal": "Review",
+        })
+    return pd.DataFrame(rows)
+
+def create_excel_export(recipes):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        build_nutrition_export_dataframe(recipes).to_excel(writer, sheet_name="Nutritionals", index=False)
+        build_allergen_export_dataframe(recipes).to_excel(writer, sheet_name="Allergens", index=False)
+        build_ingredient_export_dataframe(recipes).to_excel(writer, sheet_name="Ingredients", index=False)
+        build_diet_export_dataframe(recipes).to_excel(writer, sheet_name="GF VG HALAL", index=False)
+
+        workbook = writer.book
+        for sheet_name in writer.sheets:
+            ws = writer.sheets[sheet_name]
+            for col in ws.columns:
+                header = str(col[0].value or "")
+                if header in ["Ingredients", "Allergens"]:
+                    width = 75
+                elif header == "Menu Item":
+                    width = 30
+                else:
+                    width = 18
+                ws.column_dimensions[col[0].column_letter].width = width
+            for cell in ws[1]:
+                cell.font = cell.font.copy(bold=True)
+            ws.freeze_panes = "A2"
+    output.seek(0)
+    return output.getvalue()
+
+def create_pdf_export(recipes):
+    if SimpleDocTemplate is None:
+        return None
+
+    output = BytesIO()
+    doc = SimpleDocTemplate(
+        output,
+        pagesize=landscape(letter),
+        rightMargin=18,
+        leftMargin=18,
+        topMargin=18,
+        bottomMargin=18,
+    )
+    styles = getSampleStyleSheet()
+    story = [Paragraph("Full Nutrition Export", styles["Title"]), Spacer(1, 12)]
+
+    df = build_nutrition_export_dataframe(recipes)
+    short_cols = [
+        "Menu Item", "Serving Weight (g)", "Calories", "Total Fat (g)",
+        "Saturated Fat (g)", "Cholesterol (mg)", "Sodium (mg)",
+        "Total Carbohydrate (g)", "Dietary Fiber (g)", "Total Sugars (g)",
+        "Protein (g)", "Salt (g)", "Allergens"
+    ]
+    table_data = [short_cols]
+    for _, row in df.iterrows():
+        table_data.append([str(row.get(c, ""))[:80] for c in short_cols])
+
+    table = Table(table_data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    story.append(table)
+    story.append(Spacer(1, 14))
+    story.append(Paragraph("Ingredient Statements", styles["Heading2"]))
+
+    for recipe in recipes:
+        record = recipe_export_record(recipe)
+        story.append(Paragraph(f"<b>{record['name']}</b>", styles["Heading3"]))
+        story.append(Paragraph(f"Ingredients: {record['ingredients']}", styles["BodyText"]))
+        story.append(Paragraph(f"Allergens: {record['allergens']}", styles["BodyText"]))
+        story.append(Spacer(1, 8))
+
+    doc.build(story)
+    output.seek(0)
+    return output.getvalue()
 
 
 tabs = st.tabs(["Dashboard", "Add Product", "Batch Upload Products", "Batch Upload Recipes", "Recipe Builder", "Saved Recipes"])
@@ -797,17 +1018,71 @@ with tabs[4]:
     if not st.session_state.recipe_items:
         st.info("Use Database Search above to add items to your recipe.")
     else:
+        st.caption("Edit quantities, choose units, capture waste %, review calculated grams, or mark items for deletion.")
+
+        editor_rows = []
         for idx, item in enumerate(st.session_state.recipe_items):
-            c1, c2, c3 = st.columns([5, 2, 1])
-            c1.write(item["name"])
-            st.session_state.recipe_items[idx]["qty"] = c2.number_input("Qty", min_value=0.0, value=float(item.get("qty", 1)), step=0.25, key=f"qty_{idx}")
-            if c3.button("Remove", key=f"rem_{idx}"):
-                st.session_state.recipe_items.pop(idx)
-                st.rerun()
+            item.setdefault("amount", item.get("qty", 1.0))
+            item.setdefault("unit", "serving")
+            item.setdefault("waste_pct", 0.0)
+            item["grams"] = item_grams(item)
+            editor_rows.append({
+                "Delete": False,
+                "Ingredient": item.get("name", ""),
+                "Source": item.get("source", ""),
+                "Quantity": safe_float(item.get("amount", 1.0)),
+                "Unit": item.get("unit", "serving"),
+                "Waste %": safe_float(item.get("waste_pct", 0.0)),
+                "Grams": item.get("grams", 0.0),
+                "Calories": safe_float(item.get("calories", 0.0)),
+                "Allergens": item.get("allergens", ""),
+            })
+
+        edited_df = st.data_editor(
+            pd.DataFrame(editor_rows),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Delete": st.column_config.CheckboxColumn("Delete"),
+                "Ingredient": st.column_config.TextColumn("Ingredient", disabled=True),
+                "Source": st.column_config.TextColumn("Source", disabled=True),
+                "Quantity": st.column_config.NumberColumn("Quantity", min_value=0.0, step=0.25),
+                "Unit": st.column_config.SelectboxColumn("Unit", options=COMMON_UNITS),
+                "Waste %": st.column_config.NumberColumn("Waste %", min_value=0.0, max_value=100.0, step=1.0),
+                "Grams": st.column_config.NumberColumn("Grams", disabled=True, help="Approximate usable grams after waste. Count units need manual review."),
+                "Calories": st.column_config.NumberColumn("Calories", disabled=True),
+                "Allergens": st.column_config.TextColumn("Allergens", disabled=True),
+            },
+            key="recipe_items_editor",
+        )
+
+        updated_items = []
+        for idx, row in edited_df.iterrows():
+            if bool(row.get("Delete", False)):
+                continue
+            item = dict(st.session_state.recipe_items[idx])
+            item["amount"] = safe_float(row.get("Quantity", 1.0))
+            item["qty"] = item["amount"]
+            item["unit"] = row.get("Unit", "serving")
+            item["waste_pct"] = safe_float(row.get("Waste %", 0.0))
+            item["grams"] = item_grams(item)
+            updated_items.append(item)
+
+        c_apply, c_clear = st.columns([1, 1])
+        if c_apply.button("Apply recipe table changes"):
+            st.session_state.recipe_items = updated_items
+            st.success("Recipe items updated.")
+            st.rerun()
+        if c_clear.button("Clear recipe items"):
+            st.session_state.recipe_items = []
+            st.rerun()
+
+        if any(item_grams(item) == 0 and item.get("unit") in ["each", "piece", "slice", "serving", "portion"] for item in updated_items):
+            st.warning("Some count-based units cannot be converted to grams without item-specific weights. Review predominance and nutrition scaling before using labels commercially.")
 
         recipe_name = st.text_input("Recipe name")
         servings = st.number_input("Servings", min_value=1, value=1)
-        total, allergens, ingredient_list = totals(st.session_state.recipe_items)
+        total, allergens, ingredient_list = totals(updated_items)
         per = {k: round(v / servings, 2) for k, v in total.items()}
 
         st.subheader("Nutrition per serving")
@@ -823,17 +1098,47 @@ with tabs[4]:
 
         if st.button("Save Recipe"):
             if recipe_name:
-                st.session_state.saved_recipes.append({"name": recipe_name, "servings": servings, "items": list(st.session_state.recipe_items), "label": label, "nutrition_per_serving": per})
+                st.session_state.recipe_items = updated_items
+                st.session_state.saved_recipes.append({"name": recipe_name, "servings": servings, "items": list(updated_items), "label": label, "nutrition_per_serving": per})
                 st.success("Recipe saved")
             else:
                 st.warning("Add a recipe name")
 
 with tabs[5]:
-    st.header("Saved Recipes")
+    st.header("Saved Recipes + Full Nutrition Exports")
+
     if not st.session_state.saved_recipes:
         st.info("No saved recipes yet")
     else:
+        st.subheader("Saved Recipe Labels")
         for r in st.session_state.saved_recipes:
             with st.expander(r["name"]):
                 st.text_area("Label", r["label"], height=220)
                 st.download_button("Download label text", r["label"], file_name=f"{r['name']}_label.txt")
+
+        st.divider()
+        st.subheader("Full Nutrition Export")
+        st.caption("Exports follow the attached workbook structure: Nutritionals, Allergens, Ingredients, and GF/Vegan/Halal review sheets.")
+
+        export_df = build_nutrition_export_dataframe(st.session_state.saved_recipes)
+        st.dataframe(export_df, use_container_width=True)
+
+        excel_data = create_excel_export(st.session_state.saved_recipes)
+        st.download_button(
+            "Download Excel nutrition workbook",
+            data=excel_data,
+            file_name="full_nutrition_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        pdf_data = create_pdf_export(st.session_state.saved_recipes)
+        if pdf_data:
+            st.download_button(
+                "Download PDF nutrition report",
+                data=pdf_data,
+                file_name="full_nutrition_export.pdf",
+                mime="application/pdf",
+            )
+        else:
+            st.warning("PDF export requires reportlab. Make sure reportlab is included in requirements.txt.")
+
