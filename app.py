@@ -1065,103 +1065,262 @@ def create_nutrition_facts_pdf(recipe_name, panel_text):
 
 
 
+
+def _load_label_font(size, bold=False, condensed=False):
+    if ImageFont is None:
+        return None
+    candidates = []
+    if condensed:
+        candidates += [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        ]
+    candidates += [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ]
+    for fp in candidates:
+        try:
+            return ImageFont.truetype(fp, size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+
+def _draw_text_fit(draw, xy, text, font, fill="black", max_width=None, min_size=8, bold=False, condensed=True):
+    if max_width is None or ImageFont is None:
+        draw.text(xy, text, fill=fill, font=font)
+        return font
+    size = getattr(font, "size", min_size)
+    active_font = font
+    while size > min_size and draw.textlength(text, font=active_font) > max_width:
+        size -= 1
+        active_font = _load_label_font(size, bold=bold, condensed=condensed)
+    draw.text(xy, text, fill=fill, font=active_font)
+    return active_font
+
+
+def _parse_panel_text(panel_text):
+    lines = [line.strip() for line in (panel_text or "").splitlines() if line.strip()]
+    parsed = {"recipe": "", "servings": "", "serving_size": "1 serving", "calories": "0", "rows": [], "vitamins": [], "footnote": ""}
+    if len(lines) > 1 and lines[1].lower() != "nutrition facts":
+        parsed["recipe"] = lines[1]
+    for line in lines:
+        low = line.lower()
+        if "servings per container" in low:
+            parsed["servings"] = line
+        elif low.startswith("serving size"):
+            parsed["serving_size"] = line.replace("Serving size", "").strip() or "1 serving"
+        elif low.startswith("calories"):
+            parts = line.split()
+            parsed["calories"] = parts[-1] if parts else "0"
+        elif low.startswith(("total fat", "saturated fat", "trans fat", "cholesterol", "sodium", "total carbohydrate", "dietary fiber", "total sugars", "includes", "protein")):
+            m = re.search(r"\s(\d+%|<\s*\d+%)$", line)
+            dv = m.group(1) if m else ""
+            left = line[:m.start()].strip() if m else line
+            parsed["rows"].append((left, dv))
+        elif low.startswith(("vitamin d", "calcium", "iron", "potassium")):
+            m = re.search(r"\s(\d+%|<\s*\d+%)$", line)
+            dv = m.group(1) if m else ""
+            left = line[:m.start()].strip() if m else line
+            parsed["vitamins"].append((left, dv))
+        elif low.startswith("* the % daily"):
+            parsed["footnote"] = line
+    if not parsed["servings"]:
+        parsed["servings"] = "1 serving per container"
+    if not parsed["footnote"]:
+        parsed["footnote"] = "* The % Daily Value tells you how much a nutrient in a serving of food contributes to a daily diet."
+    return parsed
+
+
 def create_nutrition_facts_png(panel_text, label_size="2 x 4 in", dpi=300):
-    """Create a print-ready PNG version of the Nutrition Facts panel."""
+    # Create a high-resolution FDA-style Nutrition Facts PNG.
     if Image is None:
         return None
     size_map = {"2 x 4 in": (2, 4), "3 x 5 in": (3, 5), "4 x 6 in": (4, 6), "5 x 7 in": (5, 7)}
     width_in, height_in = size_map.get(label_size, (2, 4))
     width, height = int(width_in * dpi), int(height_in * dpi)
-    margin = max(int(0.07 * dpi), 14)
     img = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(img)
+    margin = max(int(0.055 * dpi), 10)
+    pad = max(int(0.035 * dpi), 7)
+    left = margin + pad
+    right = width - margin - pad
+    y = margin + pad
+    scale = max(width_in / 2.0, 1.0)
+    title_font = _load_label_font(max(int(34 * scale), 28), True, True)
+    serving_font = _load_label_font(max(int(8.8 * scale), 8), False, True)
+    serving_bold = _load_label_font(max(int(9.3 * scale), 8), True, True)
+    amount_font = _load_label_font(max(int(8 * scale), 7), True, True)
+    calories_font = _load_label_font(max(int(22 * scale), 18), True, True)
+    calories_num_font = _load_label_font(max(int(31 * scale), 24), True, True)
+    row_font = _load_label_font(max(int(8.8 * scale), 8), False, True)
+    row_bold = _load_label_font(max(int(8.8 * scale), 8), True, True)
+    foot_font = _load_label_font(max(int(6.1 * scale), 6), False, True)
+    parsed = _parse_panel_text(panel_text)
+    border_w = max(int(0.012 * dpi), 3)
+    thin_w = max(int(0.0035 * dpi), 1)
+    med_w = max(int(0.009 * dpi), 2)
+    heavy_w = max(int(0.030 * dpi), 7)
+    draw.rectangle([margin, margin, width - margin, height - margin], outline="black", width=border_w)
+    _draw_text_fit(draw, (left, y), "Nutrition Facts", title_font, max_width=right-left, min_size=20, bold=True)
+    bbox = draw.textbbox((left, y), "Nutrition Facts", font=title_font)
+    y = bbox[3] + max(int(0.010 * dpi), 3)
+    draw.line([left, y, right, y], fill="black", width=heavy_w)
+    y += max(int(0.019 * dpi), 5)
+    if parsed["recipe"]:
+        _draw_text_fit(draw, (left, y), parsed["recipe"], serving_bold, max_width=right-left, min_size=7, bold=True)
+        y += max(int(0.055 * dpi), 14)
+    draw.text((left, y), parsed["servings"], fill="black", font=serving_font)
+    y += max(int(0.050 * dpi), 13)
+    draw.text((left, y), "Serving size", fill="black", font=serving_bold)
+    ss_width = draw.textlength(parsed["serving_size"], font=serving_bold)
+    draw.text((right - ss_width, y), parsed["serving_size"], fill="black", font=serving_bold)
+    y += max(int(0.060 * dpi), 16)
+    draw.line([left, y, right, y], fill="black", width=heavy_w)
+    y += max(int(0.018 * dpi), 5)
+    draw.text((left, y), "Amount per serving", fill="black", font=amount_font)
+    y += max(int(0.046 * dpi), 12)
+    draw.text((left, y), "Calories", fill="black", font=calories_font)
+    cal_text = str(parsed["calories"])
+    cal_w = draw.textlength(cal_text, font=calories_num_font)
+    draw.text((right - cal_w, y - max(int(0.020 * dpi), 5)), cal_text, fill="black", font=calories_num_font)
+    y += max(int(0.095 * dpi), 26)
+    draw.line([left, y, right, y], fill="black", width=heavy_w)
+    y += max(int(0.010 * dpi), 3)
+    dv = "% Daily Value*"
+    dv_w = draw.textlength(dv, font=amount_font)
+    draw.text((right - dv_w, y), dv, fill="black", font=amount_font)
+    y += max(int(0.043 * dpi), 11)
+    draw.line([left, y, right, y], fill="black", width=thin_w)
 
-    def get_font(size, bold=False):
-        paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        ]
-        for fp in paths:
-            try:
-                return ImageFont.truetype(fp, size)
-            except Exception:
-                pass
-        return ImageFont.load_default()
+    def draw_row(label_amount, dv_text="", indent=0, bold=False):
+        nonlocal y
+        y += max(int(0.010 * dpi), 2)
+        font = row_bold if bold else row_font
+        x = left + indent
+        if dv_text:
+            dv_width = draw.textlength(dv_text, font=row_bold)
+            max_left_width = right - x - dv_width - max(int(0.035 * dpi), 7)
+        else:
+            dv_width = 0
+            max_left_width = right - x
+        _draw_text_fit(draw, (x, y), label_amount, font, max_width=max_left_width, min_size=6, bold=bold)
+        if dv_text:
+            draw.text((right - dv_width, y), dv_text, fill="black", font=row_bold)
+        y += max(int(0.044 * dpi), 11)
+        draw.line([left + indent, y, right, y], fill="black", width=thin_w)
 
-    title_font = get_font(max(int(0.19 * dpi), 24), True)
-    bold_font = get_font(max(int(0.062 * dpi), 10), True)
-    body_font = get_font(max(int(0.054 * dpi), 9), False)
-    small_font = get_font(max(int(0.039 * dpi), 7), False)
-
-    draw.rectangle([margin, margin, width - margin, height - margin], outline="black", width=max(3, int(0.012 * dpi)))
-    x, y = margin + int(0.04 * dpi), margin + int(0.035 * dpi)
-    right = width - margin - int(0.04 * dpi)
-    lines = [line for line in panel_text.splitlines() if line.strip()]
-    title = lines[0] if lines else "Nutrition Facts"
-    draw.text((x, y), title, fill="black", font=title_font)
-    y += (draw.textbbox((x, y), title, font=title_font)[3] - y) + int(0.03 * dpi)
-    draw.line([x, y, right, y], fill="black", width=max(8, int(0.035 * dpi)))
-    y += int(0.035 * dpi)
-
-    for line in lines[1:]:
-        if y > height - margin - int(0.25 * dpi):
-            break
-        clean = line.strip()
-        is_major = any(clean.startswith(prefix) for prefix in ["Calories", "Total Fat", "Cholesterol", "Sodium", "Total Carbohydrate", "Protein"])
-        is_small = clean.startswith("*") or clean.lower().startswith("compliance note")
-        font = small_font if is_small else (bold_font if is_major or clean.lower().startswith("serving") or clean.lower().startswith("amount") or "% daily" in clean.lower() else body_font)
-        indent = int(0.08 * dpi) if clean.startswith(("Saturated", "Trans", "Dietary", "Total Sugars")) else 0
-        if clean.startswith("Includes"):
-            indent = int(0.15 * dpi)
-        draw.text((x + indent, y), clean, fill="black", font=font)
-        y += (draw.textbbox((x + indent, y), clean, font=font)[3] - y) + int(0.014 * dpi)
-        if is_major or clean.startswith("Calories"):
-            draw.line([x, y, right, y], fill="black", width=max(1, int(0.004 * dpi)))
-            y += int(0.01 * dpi)
-
+    for left_text, dv_text in parsed["rows"]:
+        low = left_text.lower()
+        indent = 0
+        bold = low.startswith(("total fat", "cholesterol", "sodium", "total carbohydrate", "protein"))
+        if low.startswith(("saturated", "trans", "dietary", "total sugars")):
+            indent = max(int(0.075 * dpi), 14)
+        if low.startswith("includes"):
+            indent = max(int(0.145 * dpi), 26)
+        draw_row(left_text, dv_text, indent=indent, bold=bold)
+        if low.startswith("protein"):
+            draw.line([left, y, right, y], fill="black", width=med_w)
+            y += max(int(0.006 * dpi), 2)
+    if parsed["vitamins"]:
+        draw.line([left, y, right, y], fill="black", width=med_w)
+        for left_text, dv_text in parsed["vitamins"]:
+            draw_row(left_text, dv_text, indent=0, bold=False)
+    foot_y = min(y + max(int(0.025 * dpi), 6), height - margin - pad - max(int(0.30 * dpi), 55))
+    draw.line([left, foot_y, right, foot_y], fill="black", width=med_w)
+    foot_y += max(int(0.012 * dpi), 3)
+    words = parsed["footnote"].split()
+    line = ""
+    for word in words:
+        test = (line + " " + word).strip()
+        if draw.textlength(test, font=foot_font) <= right - left:
+            line = test
+        else:
+            draw.text((left, foot_y), line, fill="black", font=foot_font)
+            foot_y += max(int(0.034 * dpi), 8)
+            line = word
+    if line:
+        draw.text((left, foot_y), line, fill="black", font=foot_font)
     output = BytesIO()
     img.save(output, format="PNG", dpi=(dpi, dpi))
     return output.getvalue()
 
 
 def image_clipboard_tools(png_bytes, key="copy_image"):
-    """Image-copy tools for print-ready label PNG. Browser support varies."""
     if not png_bytes:
         return
     b64 = base64.b64encode(png_bytes).decode("utf-8")
-    data_url = f"data:image/png;base64,{b64}"
-    components.html(f"""
-        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-            <button id="copy_{key}" style="background:#0f172a;color:white;border:none;padding:8px 12px;border-radius:6px;font-weight:700;cursor:pointer;">
-                📋 Copy image to clipboard
-            </button>
-            <a id="open_{key}" href="{data_url}" target="_blank" style="background:#f3f4f6;color:#111827;text-decoration:none;border:1px solid #d1d5db;padding:8px 12px;border-radius:6px;font-weight:700;">
-                Open PNG in new tab
-            </a>
-            <span id="status_{key}" style="font-size:12px;color:#6b7280;"></span>
+    components.html(f'''
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-family:Arial, sans-serif;">
+            <button id="copy_{key}" style="background:#0f172a;color:white;border:none;padding:9px 13px;border-radius:7px;font-weight:700;cursor:pointer;">📋 Copy label image</button>
+            <a download="nutrition_facts_label.png" href="data:image/png;base64,{b64}" style="background:#f8fafc;color:#111827;text-decoration:none;border:1px solid #cbd5e1;padding:9px 13px;border-radius:7px;font-weight:700;">📥 Download PNG</a>
+            <span id="status_{key}" style="font-size:12px;color:#475569;"></span>
         </div>
         <script>
         const btn_{key} = document.getElementById("copy_{key}");
         const status_{key} = document.getElementById("status_{key}");
         btn_{key}.onclick = async () => {{
             try {{
-                if (!navigator.clipboard || !window.ClipboardItem) {{
-                    throw new Error("Image clipboard is not supported in this browser/context.");
-                }}
-                const res = await fetch("{data_url}");
-                const blob = await res.blob();
+                if (!navigator.clipboard || !window.ClipboardItem) throw new Error("Image clipboard not supported");
+                const binary = atob("{b64}");
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                const blob = new Blob([bytes], {{type: "image/png"}});
                 await navigator.clipboard.write([new ClipboardItem({{"image/png": blob}})]);
-                status_{key}.innerText = "Copied PNG image. Paste into Word, PowerPoint, Canva, etc.";
-                btn_{key}.innerText = "✅ Image copied";
-                setTimeout(() => {{ btn_{key}.innerText = "📋 Copy image to clipboard"; }}, 1600);
+                status_{key}.innerText = "✅ Copied image. Paste into Word, PowerPoint, Canva, etc.";
+                btn_{key}.innerText = "✅ Copied";
+                setTimeout(() => {{ btn_{key}.innerText = "📋 Copy label image"; }}, 1800);
             }} catch (err) {{
-                status_{key}.innerText = "Browser blocked image copy. Use Open PNG in new tab, then right-click/tap-hold → Copy Image, or Download PNG.";
+                status_{key}.innerText = "⚠️ Browser blocked image copy. Use Download PNG.";
                 btn_{key}.innerText = "Copy blocked";
-                setTimeout(() => {{ btn_{key}.innerText = "📋 Copy image to clipboard"; }}, 2200);
+                setTimeout(() => {{ btn_{key}.innerText = "📋 Copy label image"; }}, 2200);
             }}
         }};
         </script>
-    """, height=72)
+    ''', height=76)
+
+
+def create_zpl_from_panel(panel_text, label_size="2 x 4 in", dpi=203):
+    size_map = {"2 x 4 in": (2, 4), "3 x 5 in": (3, 5), "4 x 6 in": (4, 6), "5 x 7 in": (5, 7)}
+    w_in, h_in = size_map.get(label_size, (2, 4))
+    w, h = int(w_in * dpi), int(h_in * dpi)
+    lines = [re.sub(r"[^A-Za-z0-9 %/*.,:;()<>+-]", "", line.strip()) for line in (panel_text or "").splitlines() if line.strip()]
+    z = ["^XA", f"^PW{w}", f"^LL{h}", "^CI28"]
+    margin = max(int(0.08 * dpi), 16)
+    y = margin
+    z.append(f"^FO{margin},{margin}^GB{w-2*margin},{h-2*margin},3^FS")
+    for i, line in enumerate(lines):
+        if y > h - margin - 30:
+            break
+        if i == 0:
+            z.append(f"^FO{margin+10},{y}^A0N,42,38^FD{line}^FS")
+            y += 52
+            z.append(f"^FO{margin+10},{y}^GB{w-2*margin-20},8,8^FS")
+            y += 18
+        elif line.lower().startswith("calories"):
+            z.append(f"^FO{margin+10},{y}^A0N,38,34^FD{line}^FS")
+            y += 46
+            z.append(f"^FO{margin+10},{y}^GB{w-2*margin-20},8,8^FS")
+            y += 16
+        else:
+            font_h = 24 if not line.startswith("*") else 17
+            font_w = 21 if not line.startswith("*") else 15
+            z.append(f"^FO{margin+12},{y}^A0N,{font_h},{font_w}^FD{line[:54]}^FS")
+            y += font_h + 5
+    z.append("^XZ")
+    return "\n".join(z)
+
+
+def create_batch_zpl_zip(saved_recipes, label_size="2 x 4 in", dpi=203):
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
+        for recipe in saved_recipes:
+            name = recipe.get("name", "recipe")
+            panel_text = recipe.get("nutrition_facts_panel") or nutrition_facts_panel_text(name, recipe.get("nutrition_per_serving", {}), recipe.get("servings", 1), recipe.get("serving_weight_g", 0), recipe.get("serving_size_label"))
+            safe_name = re.sub(r"[^A-Za-z0-9_\-]+", "_", name).strip("_") or "recipe"
+            zf.writestr(f"{safe_name}_nutrition_facts.zpl", create_zpl_from_panel(panel_text, label_size, dpi))
+    return output.getvalue()
 
 
 def create_batch_label_zip(saved_recipes, label_size="2 x 4 in", dpi=300):
@@ -1499,9 +1658,6 @@ with tabs[4]:
         st.subheader("Nutrition Facts Panel Preview")
         render_nutrition_facts_panel(recipe_name or "Recipe", per, servings, serving_weight_g, serving_size_label)
         panel_text = nutrition_facts_panel_text(recipe_name or "Recipe", per, servings, serving_weight_g, serving_size_label)
-        st.text_area("Nutrition Facts panel text (optional text copy)", panel_text, height=260)
-        copy_button("📋 Copy panel as text", panel_text, key="copy_current_panel")
-
         panel_pdf = create_nutrition_facts_pdf(recipe_name or "Recipe", panel_text)
         if panel_pdf:
             st.download_button("Download Nutrition Facts Panel PDF", panel_pdf, file_name=f"{(recipe_name or 'recipe').replace(' ', '_')}_nutrition_facts_panel.pdf", mime="application/pdf")
@@ -1515,7 +1671,9 @@ with tabs[4]:
             st.image(label_png, caption=f"Nutrition Facts label preview — {label_size}, {label_dpi} DPI")
             image_clipboard_tools(label_png, key="copy_current_label_image")
             st.download_button("Download print-ready PNG label", label_png, file_name=f"{(recipe_name or 'recipe').replace(' ', '_')}_nutrition_facts_{label_dpi}dpi.png", mime="image/png")
-            st.caption("For an actual photo/image paste, use Copy image to clipboard. If your browser blocks it, click Open PNG in new tab and right-click/tap-hold → Copy Image, or download the PNG.")
+            zpl_text = create_zpl_from_panel(panel_text, label_size, 203)
+            st.download_button("Download Zebra/ZPL label file", zpl_text, file_name=f"{(recipe_name or 'recipe').replace(' ', '_')}_nutrition_facts.zpl", mime="text/plain")
+            st.caption("Use Copy label image where supported. If the browser blocks image clipboard access, use Download PNG. ZPL is for Zebra-compatible printers and may need printer-specific adjustment.")
         else:
             st.warning("PNG label export requires Pillow. Add pillow to requirements.txt.")
 
@@ -1552,8 +1710,6 @@ with tabs[5]:
                 panel_per = r.get("nutrition_per_serving", {})
                 panel_text = r.get("nutrition_facts_panel") or nutrition_facts_panel_text(r.get("name", "Recipe"), panel_per, r.get("servings", 1), r.get("serving_weight_g", 0))
                 render_nutrition_facts_panel(r.get("name", "Recipe"), panel_per, r.get("servings", 1), r.get("serving_weight_g", 0))
-                st.text_area("Nutrition Facts panel text", panel_text, height=260, key=f"saved_panel_{r['name']}")
-                copy_button("📋 Copy panel as text", panel_text, key=f"copy_saved_{r['name']}")
                 panel_pdf = create_nutrition_facts_pdf(r.get("name", "Recipe"), panel_text)
                 if panel_pdf:
                     st.download_button("Download Nutrition Facts PDF", panel_pdf, file_name=f"{r['name']}_nutrition_facts.pdf", mime="application/pdf")
@@ -1565,6 +1721,8 @@ with tabs[5]:
                     st.image(saved_png, caption=f"Print-ready label — {saved_size}, {saved_dpi} DPI")
                     image_clipboard_tools(saved_png, key=f"copy_saved_label_image_{re.sub(r'[^A-Za-z0-9_]+', '_', r['name'])}")
                     st.download_button("Download print-ready PNG", saved_png, file_name=f"{r['name']}_nutrition_facts_{saved_dpi}dpi.png", mime="image/png")
+                    saved_zpl = create_zpl_from_panel(panel_text, saved_size, 203)
+                    st.download_button("Download Zebra/ZPL label", saved_zpl, file_name=f"{r['name']}_nutrition_facts.zpl", mime="text/plain")
 
         st.divider()
         st.subheader("Batch Print-Ready Label Export")
@@ -1573,6 +1731,8 @@ with tabs[5]:
         batch_dpi = batch_cols[1].selectbox("Batch print DPI", [203, 300, 600], index=1)
         batch_zip = create_batch_label_zip(st.session_state.saved_recipes, batch_size, batch_dpi)
         st.download_button("Download all saved labels as PNG ZIP", batch_zip, file_name="nutrition_facts_labels_png.zip", mime="application/zip")
+        batch_zpl_zip = create_batch_zpl_zip(st.session_state.saved_recipes, batch_size, 203)
+        st.download_button("Download all saved labels as Zebra/ZPL ZIP", batch_zpl_zip, file_name="nutrition_facts_labels_zpl.zip", mime="application/zip")
 
         st.divider()
         st.subheader("Full Nutrition Export")
