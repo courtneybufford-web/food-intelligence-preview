@@ -3,6 +3,6 @@ pandas
 requests
 openpyxl
 reportlab
+pillow
 pypdf
 python-docx
-pillow
