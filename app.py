@@ -5,6 +5,10 @@ import re
 import zipfile
 from io import BytesIO
 try:
+    from docx import Document
+except Exception:
+    Document = None
+try:
     from pypdf import PdfReader
 except Exception:
     PdfReader = None
@@ -212,6 +216,170 @@ def parse_batch_uploads(uploaded_files):
     return parsed, errors
 
 
+
+def extract_text_from_docx_bytes(file_bytes):
+    if Document is None:
+        return ""
+    try:
+        doc = Document(BytesIO(file_bytes))
+        paragraphs = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
+        table_text = []
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                if cells:
+                    table_text.append(" | ".join(cells))
+        return "\n".join(paragraphs + table_text)
+    except Exception:
+        return ""
+
+
+def extract_text_from_excel_bytes(file_bytes, filename="uploaded.xlsx"):
+    try:
+        sheets = pd.read_excel(BytesIO(file_bytes), sheet_name=None, header=None)
+        chunks = []
+        for sheet_name, df in sheets.items():
+            chunks.append(f"Sheet: {sheet_name}")
+            for _, row in df.fillna("").iterrows():
+                values = [str(v).strip() for v in row.tolist() if str(v).strip()]
+                if values:
+                    chunks.append(" | ".join(values))
+        return "\n".join(chunks)
+    except Exception:
+        return ""
+
+
+def extract_text_from_csv_bytes(file_bytes):
+    try:
+        df = pd.read_csv(BytesIO(file_bytes), header=None).fillna("")
+        rows = []
+        for _, row in df.iterrows():
+            values = [str(v).strip() for v in row.tolist() if str(v).strip()]
+            if values:
+                rows.append(" | ".join(values))
+        return "\n".join(rows)
+    except Exception:
+        try:
+            return file_bytes.decode("utf-8")
+        except Exception:
+            return file_bytes.decode("latin-1", errors="ignore")
+
+
+def extract_text_from_recipe_file_bytes(name, data):
+    lower = name.lower()
+    if lower.endswith(".txt"):
+        try:
+            return data.decode("utf-8")
+        except Exception:
+            return data.decode("latin-1", errors="ignore")
+    if lower.endswith(".pdf"):
+        return extract_text_from_pdf_bytes(data)
+    if lower.endswith(".docx"):
+        return extract_text_from_docx_bytes(data)
+    if lower.endswith(".xlsx") or lower.endswith(".xls"):
+        return extract_text_from_excel_bytes(data, name)
+    if lower.endswith(".csv"):
+        return extract_text_from_csv_bytes(data)
+    return ""
+
+
+def guess_recipe_name(text, filename="Uploaded Recipe"):
+    base_name = filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ").strip().title()
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    for line in lines[:12]:
+        low = line.lower()
+        if any(label in low for label in ["recipe name", "menu item", "dish name", "product name"]):
+            if ":" in line:
+                return line.split(":", 1)[1].strip() or base_name
+            if "|" in line:
+                return line.split("|", 1)[-1].strip() or base_name
+        if len(line) <= 80 and not any(token in low for token in ["ingredients", "method", "directions", "nutrition", "allergen", "yield", "servings"]):
+            return line
+    return base_name
+
+
+def extract_servings_from_text(text):
+    lower = (text or "").lower()
+    patterns = [
+        r"servings?\D+(\d+(?:\.\d+)?)",
+        r"serves\D+(\d+(?:\.\d+)?)",
+        r"yield\D+(\d+(?:\.\d+)?)",
+        r"portions?\D+(\d+(?:\.\d+)?)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, lower)
+        if m:
+            return max(1, int(float(m.group(1))))
+    return 1
+
+
+def parse_recipe_upload_text(text, filename="Uploaded Recipe"):
+    raw = text or ""
+    name = guess_recipe_name(raw, filename)
+    servings = extract_servings_from_text(raw)
+    ingredients = extract_ingredients_from_text(raw)
+    if not ingredients:
+        rows = []
+        for line in raw.splitlines():
+            low = line.lower().strip()
+            if not low or any(x in low for x in ["method", "direction", "instruction", "nutrition", "calories", "servings", "yield"]):
+                continue
+            if any(unit in low for unit in [" g", " kg", " oz", " lb", " cup", " tbsp", " tsp", " ml", " l "]):
+                rows.append(line.strip())
+        ingredients = ", ".join(rows[:40])
+    if not ingredients:
+        ingredients = "Needs manual ingredient review"
+    calories = find_nutrient_value(raw, ["calories", "kcal", "energy"])
+    protein = find_nutrient_value(raw, ["protein"])
+    fat = find_nutrient_value(raw, ["total fat", "fat"])
+    carbs = find_nutrient_value(raw, ["total carbohydrate", "carbohydrate", "carbs"])
+    sodium_mg = find_nutrient_value(raw, ["sodium"])
+    salt = find_nutrient_value(raw, ["salt"])
+    if salt == 0 and sodium_mg:
+        salt = round(sodium_mg * 2.5 / 1000, 3)
+    per = {"calories": calories, "protein": protein, "fat": fat, "carbs": carbs, "salt": salt}
+    detected_allergens = detect_allergens(raw + " " + ingredients)
+    allergen_text = "Contains: " + (detected_allergens if detected_allergens else "No declarable allergens detected")
+    label = f"""{name}\n\nIngredients: {ingredients}\n\n{allergen_text}\n\nNutrition per serving:\nEnergy: {per['calories']} kcal\nFat: {per['fat']} g\nCarbohydrate: {per['carbs']} g\nProtein: {per['protein']} g\nSalt: {per['salt']} g\n"""
+    return {"name": name, "servings": servings, "items": [], "label": label, "nutrition_per_serving": per, "uploaded_ingredients": ingredients, "allergens": detected_allergens, "filename": filename, "raw_text": raw}
+
+
+def parse_recipe_batch_uploads(uploaded_files):
+    parsed = []
+    errors = []
+    supported = (".txt", ".pdf", ".docx", ".xlsx", ".xls", ".csv")
+    for uploaded in uploaded_files:
+        name = uploaded.name
+        data = uploaded.read()
+        lower = name.lower()
+        if lower.endswith(".zip"):
+            try:
+                with zipfile.ZipFile(BytesIO(data)) as zf:
+                    for info in zf.infolist():
+                        if info.is_dir():
+                            continue
+                        fname = info.filename
+                        if not fname.lower().endswith(supported):
+                            continue
+                        inner = zf.read(info)
+                        extracted = extract_text_from_recipe_file_bytes(fname, inner)
+                        if extracted.strip():
+                            parsed.append(parse_recipe_upload_text(extracted, fname))
+                        else:
+                            errors.append(f"No text extracted from {fname}")
+            except Exception as e:
+                errors.append(f"Could not read ZIP {name}: {e}")
+        elif lower.endswith(supported):
+            extracted = extract_text_from_recipe_file_bytes(name, data)
+            if extracted.strip():
+                parsed.append(parse_recipe_upload_text(extracted, name))
+            else:
+                errors.append(f"No text extracted from {name}")
+        else:
+            errors.append(f"Unsupported recipe file type: {name}")
+    return parsed, errors
+
+
 def totals(items):
     t = {"calories":0.0,"protein":0.0,"fat":0.0,"carbs":0.0,"salt":0.0}
     allergens = set()
@@ -269,7 +437,7 @@ def search_customer_and_sample(query):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def search_open_food_facts(query, limit=15):
+def search_open_food_facts(query, limit=75):
     if not query or len(query.strip()) < 3:
         return []
     try:
@@ -312,7 +480,7 @@ def search_open_food_facts(query, limit=15):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def search_usda(query, api_key, limit=15):
+def search_usda(query, api_key, limit=75):
     if not api_key or not query or len(query.strip()) < 3:
         return []
     try:
@@ -357,8 +525,8 @@ def search_usda(query, api_key, limit=15):
 def combined_database_search(query):
     api_key = st.secrets.get("USDA_API_KEY", "")
     local = search_customer_and_sample(query)
-    usda = search_usda(query, api_key, limit=15) if len(query.strip()) >= 3 else []
-    off = search_open_food_facts(query, limit=15) if len(query.strip()) >= 3 else []
+    usda = search_usda(query, api_key, limit=75) if len(query.strip()) >= 3 else []
+    off = search_open_food_facts(query, limit=75) if len(query.strip()) >= 3 else []
 
     # Keep local matches first, then USDA, then OFF. Remove exact duplicate names from same source.
     seen = set()
@@ -420,7 +588,7 @@ def render_search_result(product, index, prefix="search"):
                 })
 
 
-tabs = st.tabs(["Dashboard", "Add Product", "Batch Upload", "Recipe Builder", "Saved Recipes"])
+tabs = st.tabs(["Dashboard", "Add Product", "Batch Upload Products", "Batch Upload Recipes", "Recipe Builder", "Saved Recipes"])
 
 with tabs[0]:
     st.header("Dashboard")
@@ -515,6 +683,68 @@ with tabs[2]:
         st.info("Tip: ZIP upload is the easiest way to upload a folder of product specs from your computer.")
 
 with tabs[3]:
+    st.header("Batch Upload Recipes")
+    st.caption("Upload multiple recipe files or a .zip folder. Supported files: .txt, .pdf, .docx, .xlsx, .xls, .csv, and .zip.")
+
+    recipe_uploads = st.file_uploader(
+        "Upload recipe files",
+        type=["txt", "pdf", "docx", "xlsx", "xls", "csv", "zip"],
+        accept_multiple_files=True,
+        key="recipe_batch_uploads",
+    )
+
+    if recipe_uploads:
+        if st.button("Extract Recipes from Uploaded Files"):
+            parsed_recipes, recipe_errors = parse_recipe_batch_uploads(recipe_uploads)
+            st.session_state["recipe_batch_preview"] = parsed_recipes
+            st.session_state["recipe_batch_errors"] = recipe_errors
+
+    recipe_batch_preview = st.session_state.get("recipe_batch_preview", [])
+    recipe_batch_errors = st.session_state.get("recipe_batch_errors", [])
+
+    if recipe_batch_errors:
+        st.warning("Some recipe files need review:")
+        for err in recipe_batch_errors:
+            st.write("-", err)
+
+    if recipe_batch_preview:
+        st.success(f"Extracted {len(recipe_batch_preview)} recipe(s). Review below, then add them to Saved Recipes.")
+        for i, recipe in enumerate(recipe_batch_preview):
+            with st.expander(f"Review Recipe: {recipe['name']}", expanded=(i == 0)):
+                st.write("Source file:", recipe.get("filename", ""))
+                recipe["name"] = st.text_input("Recipe name", value=recipe["name"], key=f"recipe_batch_name_{i}")
+                recipe["servings"] = st.number_input("Servings", min_value=1, value=int(recipe.get("servings", 1)), key=f"recipe_batch_servings_{i}")
+                recipe["uploaded_ingredients"] = st.text_area("Ingredient statement", value=recipe.get("uploaded_ingredients", ""), height=110, key=f"recipe_batch_ingredients_{i}")
+                recipe["allergens"] = st.text_input("Allergens", value=recipe.get("allergens", ""), key=f"recipe_batch_allergens_{i}")
+                c1, c2, c3, c4, c5 = st.columns(5)
+                recipe["nutrition_per_serving"]["calories"] = c1.number_input("Calories / serving", value=float(recipe["nutrition_per_serving"].get("calories", 0)), key=f"recipe_batch_cal_{i}")
+                recipe["nutrition_per_serving"]["protein"] = c2.number_input("Protein g / serving", value=float(recipe["nutrition_per_serving"].get("protein", 0)), key=f"recipe_batch_pro_{i}")
+                recipe["nutrition_per_serving"]["fat"] = c3.number_input("Fat g / serving", value=float(recipe["nutrition_per_serving"].get("fat", 0)), key=f"recipe_batch_fat_{i}")
+                recipe["nutrition_per_serving"]["carbs"] = c4.number_input("Carbs g / serving", value=float(recipe["nutrition_per_serving"].get("carbs", 0)), key=f"recipe_batch_carbs_{i}")
+                recipe["nutrition_per_serving"]["salt"] = c5.number_input("Salt g / serving", value=float(recipe["nutrition_per_serving"].get("salt", 0)), key=f"recipe_batch_salt_{i}")
+                allergen_text = "Contains: " + (recipe.get("allergens") or "No declarable allergens detected")
+                recipe["label"] = f"""{recipe['name']}\n\nIngredients: {recipe.get('uploaded_ingredients', '')}\n\n{allergen_text}\n\nNutrition per serving:\nEnergy: {recipe['nutrition_per_serving']['calories']} kcal\nFat: {recipe['nutrition_per_serving']['fat']} g\nCarbohydrate: {recipe['nutrition_per_serving']['carbs']} g\nProtein: {recipe['nutrition_per_serving']['protein']} g\nSalt: {recipe['nutrition_per_serving']['salt']} g\n"""
+                st.text_area("Generated label preview", value=recipe["label"], height=220, key=f"recipe_batch_label_{i}")
+
+        if st.button("Add All Extracted Recipes to Saved Recipes"):
+            for recipe in recipe_batch_preview:
+                st.session_state.saved_recipes.append({
+                    "name": recipe["name"],
+                    "servings": recipe["servings"],
+                    "items": recipe.get("items", []),
+                    "label": recipe["label"],
+                    "nutrition_per_serving": recipe["nutrition_per_serving"],
+                    "uploaded_ingredients": recipe.get("uploaded_ingredients", ""),
+                    "source_file": recipe.get("filename", ""),
+                })
+            st.success(f"Added {len(recipe_batch_preview)} recipes to Saved Recipes.")
+            st.session_state["recipe_batch_preview"] = []
+            st.session_state["recipe_batch_errors"] = []
+            st.rerun()
+    else:
+        st.info("Tip: ZIP upload is the easiest way to upload a folder of recipe docs from your computer.")
+
+with tabs[4]:
     st.header("Recipe Builder")
     st.subheader("Database Search")
     st.caption("Start typing to preview predicted matches from Customer/Sample, USDA, and Open Food Facts. No search button needed.")
@@ -535,8 +765,32 @@ with tabs[3]:
             st.caption(f"Showing predicted matches for: {q}")
         else:
             st.caption("Suggested database items")
-        for i, p in enumerate(results[:24]):
-            render_search_result(p, i, prefix="predictive")
+
+        st.write(f"Total results available: {len(results)}")
+        if results:
+            display_options = []
+            for idx, product in enumerate(results):
+                product = normalize_product(product)
+                display_options.append(
+                    f"{idx + 1}. [{product.get('source', 'Unknown')}] {product.get('name', 'Unnamed')} — {product.get('calories', 0):g} cal"
+                )
+
+            selected_label = st.selectbox(
+                "Scrollable result list — choose an item to preview or add",
+                display_options,
+                index=0,
+                key=f"recipe_search_select_{q}",
+            )
+            selected_index = display_options.index(selected_label)
+            selected_product = normalize_product(results[selected_index])
+
+            st.subheader("Selected Result")
+            render_search_result(selected_product, selected_index, prefix="selected_dropdown")
+
+            with st.expander("Show top result cards", expanded=False):
+                st.caption("Showing the first 20 cards below. Use the dropdown above to access the full result list.")
+                for i, p in enumerate(results[:20]):
+                    render_search_result(p, i, prefix="predictive_cards")
 
     st.divider()
     st.subheader("Current Recipe Items")
@@ -574,7 +828,7 @@ with tabs[3]:
             else:
                 st.warning("Add a recipe name")
 
-with tabs[4]:
+with tabs[5]:
     st.header("Saved Recipes")
     if not st.session_state.saved_recipes:
         st.info("No saved recipes yet")
