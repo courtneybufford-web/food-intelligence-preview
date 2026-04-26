@@ -809,6 +809,101 @@ def create_pdf_export(recipes):
     return output.getvalue()
 
 
+def nutrition_facts_panel_text(recipe_name, per_serving, servings=1, serving_weight_g=0):
+    calories = safe_float(per_serving.get("calories", 0))
+    fat = safe_float(per_serving.get("fat", 0))
+    carbs = safe_float(per_serving.get("carbs", 0))
+    protein = safe_float(per_serving.get("protein", 0))
+    salt = safe_float(per_serving.get("salt", 0))
+    sodium_mg = round(salt * 1000 / 2.5, 0) if salt else 0
+    serving_line = f"{serving_weight_g:g} g" if serving_weight_g else "1 serving"
+    return f"""Nutrition Facts
+{recipe_name}
+Serving size {serving_line}
+Servings per recipe {servings}
+
+Amount Per Serving
+Calories {calories:g}
+
+Total Fat {fat:g}g
+Saturated Fat 0g
+Trans Fat 0g
+Cholesterol 0mg
+Sodium {sodium_mg:g}mg
+Total Carbohydrate {carbs:g}g
+Dietary Fiber 0g
+Total Sugars 0g
+Includes 0g Added Sugars
+Protein {protein:g}g
+
+Vitamin D 0mcg
+Calcium 0mg
+Iron 0mg
+Potassium 0mg
+
+* Review all values, serving size, rounding, and required nutrients before commercial label use.
+"""
+
+
+def render_nutrition_facts_panel(recipe_name, per_serving, servings=1, serving_weight_g=0):
+    calories = safe_float(per_serving.get("calories", 0))
+    fat = safe_float(per_serving.get("fat", 0))
+    carbs = safe_float(per_serving.get("carbs", 0))
+    protein = safe_float(per_serving.get("protein", 0))
+    salt = safe_float(per_serving.get("salt", 0))
+    sodium_mg = round(salt * 1000 / 2.5, 0) if salt else 0
+    serving_line = f"{serving_weight_g:g} g" if serving_weight_g else "1 serving"
+    html = f"""
+    <div style="max-width:360px;border:3px solid #111;padding:10px;background:white;color:#111;font-family:Arial, Helvetica, sans-serif;">
+        <div style="font-weight:900;font-size:34px;line-height:34px;border-bottom:8px solid #111;">Nutrition Facts</div>
+        <div style="font-size:14px;margin-top:4px;"><b>{recipe_name}</b></div>
+        <div style="font-size:14px;">Serving size <b>{serving_line}</b></div>
+        <div style="font-size:14px;border-bottom:5px solid #111;">Servings per recipe <b>{servings}</b></div>
+        <div style="font-size:12px;font-weight:700;margin-top:4px;">Amount Per Serving</div>
+        <div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:8px solid #111;">
+            <div style="font-weight:900;font-size:28px;">Calories</div>
+            <div style="font-weight:900;font-size:32px;">{calories:g}</div>
+        </div>
+        <div style="font-size:12px;text-align:right;border-bottom:1px solid #111;font-weight:700;">% Daily Value*</div>
+        <div style="border-bottom:1px solid #111;"><b>Total Fat</b> {fat:g}g</div>
+        <div style="border-bottom:1px solid #111;padding-left:15px;">Saturated Fat 0g</div>
+        <div style="border-bottom:1px solid #111;padding-left:15px;"><i>Trans</i> Fat 0g</div>
+        <div style="border-bottom:1px solid #111;"><b>Cholesterol</b> 0mg</div>
+        <div style="border-bottom:1px solid #111;"><b>Sodium</b> {sodium_mg:g}mg</div>
+        <div style="border-bottom:1px solid #111;"><b>Total Carbohydrate</b> {carbs:g}g</div>
+        <div style="border-bottom:1px solid #111;padding-left:15px;">Dietary Fiber 0g</div>
+        <div style="border-bottom:1px solid #111;padding-left:15px;">Total Sugars 0g</div>
+        <div style="border-bottom:1px solid #111;padding-left:30px;">Includes 0g Added Sugars</div>
+        <div style="border-bottom:8px solid #111;"><b>Protein</b> {protein:g}g</div>
+        <div style="border-bottom:1px solid #111;">Vitamin D 0mcg</div>
+        <div style="border-bottom:1px solid #111;">Calcium 0mg</div>
+        <div style="border-bottom:1px solid #111;">Iron 0mg</div>
+        <div style="border-bottom:5px solid #111;">Potassium 0mg</div>
+        <div style="font-size:10px;margin-top:5px;">* Review serving size, rounding, and required nutrients before commercial label use.</div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def create_nutrition_facts_pdf(recipe_name, panel_text):
+    if SimpleDocTemplate is None:
+        return None
+    output = BytesIO()
+    doc = SimpleDocTemplate(output, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    styles = getSampleStyleSheet()
+    story = [Paragraph("Nutrition Facts Panel", styles["Title"]), Spacer(1, 12)]
+    for line in panel_text.splitlines():
+        if line.strip() == "Nutrition Facts":
+            story.append(Paragraph(f"<b>{line}</b>", styles["Title"]))
+        elif line.strip():
+            story.append(Paragraph(line, styles["BodyText"]))
+        else:
+            story.append(Spacer(1, 6))
+    doc.build(story)
+    output.seek(0)
+    return output.getvalue()
+
+
 tabs = st.tabs(["Dashboard", "Add Product", "Batch Upload Products", "Batch Upload Recipes", "Recipe Builder", "Saved Recipes"])
 
 with tabs[0]:
@@ -997,7 +1092,7 @@ with tabs[4]:
                 )
 
             selected_label = st.selectbox(
-                "Scrollable result list — choose an item to preview or add",
+                "Scrollable result list — choose an item",
                 display_options,
                 index=0,
                 key=f"recipe_search_select_{q}",
@@ -1005,14 +1100,43 @@ with tabs[4]:
             selected_index = display_options.index(selected_label)
             selected_product = normalize_product(results[selected_index])
 
-            st.subheader("Selected Result")
-            render_search_result(selected_product, selected_index, prefix="selected_dropdown")
+            st.markdown("#### Selected result")
+            with st.container(border=True):
+                top_cols = st.columns([5.5, 1.4, 1.2])
+                with top_cols[0]:
+                    st.markdown(
+                        f"**{selected_product['name']}** &nbsp; {badge_html(selected_product.get('source', 'Customer'))}",
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(selected_product.get("serving_note") or f"{selected_product.get('calories', 0):g} cal per serving")
+                    if selected_product.get("allergens"):
+                        st.warning(f"Allergens: {selected_product.get('allergens')}")
+                with top_cols[1]:
+                    if st.button("+ Add to Recipe", key=f"dropdown_add_{selected_index}_{selected_product['source']}_{selected_product['name']}"):
+                        item = dict(selected_product)
+                        item["amount"] = 1.0
+                        item["unit"] = "serving"
+                        item["waste_pct"] = 0.0
+                        item["grams"] = item_grams(item)
+                        st.session_state.recipe_items.append(item)
+                        st.success(f"Added {selected_product['name']}")
+                        st.rerun()
+                with top_cols[2]:
+                    preview = st.toggle("Preview", key=f"dropdown_preview_{selected_index}_{selected_product['source']}_{selected_product['name']}")
 
-            with st.expander("Show top result cards", expanded=False):
-                st.caption("Showing the first 20 cards below. Use the dropdown above to access the full result list.")
-                for i, p in enumerate(results[:20]):
-                    render_search_result(p, i, prefix="predictive_cards")
-
+                if preview:
+                    st.write("**Ingredients**")
+                    st.write(selected_product.get("ingredients", "") or "Not available")
+                    st.write("**Allergens**")
+                    st.write(selected_product.get("allergens", "") or "None detected")
+                    st.write("**Nutrition**")
+                    st.json({
+                        "calories": selected_product.get("calories", 0),
+                        "protein_g": selected_product.get("protein", 0),
+                        "fat_g": selected_product.get("fat", 0),
+                        "carbs_g": selected_product.get("carbs", 0),
+                        "salt_g": selected_product.get("salt", 0),
+                    })
     st.divider()
     st.subheader("Current Recipe Items")
     if not st.session_state.recipe_items:
@@ -1087,6 +1211,17 @@ with tabs[4]:
 
         st.subheader("Nutrition per serving")
         st.json(per)
+
+        serving_weight_g = round(sum(item_grams(item) for item in updated_items) / max(servings, 1), 2)
+        st.subheader("Nutrition Facts Panel Preview")
+        render_nutrition_facts_panel(recipe_name or "Recipe", per, servings, serving_weight_g)
+        panel_text = nutrition_facts_panel_text(recipe_name or "Recipe", per, servings, serving_weight_g)
+        st.text_area("Copy Nutrition Facts panel text", panel_text, height=260)
+
+        panel_pdf = create_nutrition_facts_pdf(recipe_name or "Recipe", panel_text)
+        if panel_pdf:
+            st.download_button("Download Nutrition Facts Panel PDF", panel_pdf, file_name=f"{(recipe_name or 'recipe').replace(' ', '_')}_nutrition_facts_panel.pdf", mime="application/pdf")
+
         st.subheader("Ingredient statement")
         st.text_area("Ingredient list", ingredient_list, height=100)
         st.subheader("Allergen declaration")
@@ -1099,7 +1234,7 @@ with tabs[4]:
         if st.button("Save Recipe"):
             if recipe_name:
                 st.session_state.recipe_items = updated_items
-                st.session_state.saved_recipes.append({"name": recipe_name, "servings": servings, "items": list(updated_items), "label": label, "nutrition_per_serving": per})
+                st.session_state.saved_recipes.append({"name": recipe_name, "servings": servings, "items": list(updated_items), "label": label, "nutrition_per_serving": per, "nutrition_facts_panel": panel_text, "serving_weight_g": serving_weight_g})
                 st.success("Recipe saved")
             else:
                 st.warning("Add a recipe name")
@@ -1115,6 +1250,15 @@ with tabs[5]:
             with st.expander(r["name"]):
                 st.text_area("Label", r["label"], height=220)
                 st.download_button("Download label text", r["label"], file_name=f"{r['name']}_label.txt")
+
+                st.subheader("Nutrition Facts Panel")
+                panel_per = r.get("nutrition_per_serving", {})
+                panel_text = r.get("nutrition_facts_panel") or nutrition_facts_panel_text(r.get("name", "Recipe"), panel_per, r.get("servings", 1), r.get("serving_weight_g", 0))
+                render_nutrition_facts_panel(r.get("name", "Recipe"), panel_per, r.get("servings", 1), r.get("serving_weight_g", 0))
+                st.text_area("Nutrition Facts panel text", panel_text, height=260, key=f"saved_panel_{r['name']}")
+                panel_pdf = create_nutrition_facts_pdf(r.get("name", "Recipe"), panel_text)
+                if panel_pdf:
+                    st.download_button("Download Nutrition Facts PDF", panel_pdf, file_name=f"{r['name']}_nutrition_facts.pdf", mime="application/pdf")
 
         st.divider()
         st.subheader("Full Nutrition Export")
