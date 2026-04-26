@@ -12,7 +12,7 @@ except Exception:
 
 st.set_page_config(page_title="Food Intelligence Platform", layout="wide")
 st.title("Food Intelligence Platform — MVP Preview")
-st.caption("Products, ingredients, USDA/Open Food Facts search, nested recipes/subrecipes, nutrition panels, copy-ready labels, and exports.")
+st.caption("Products, ingredients, consolidated database search inside Recipe Builder, nested recipes/subrecipes, UK Natasha's Law label outputs, copy-ready labels, and exports.")
 
 # -----------------------------
 # Session state
@@ -21,6 +21,8 @@ for key, default in {
     "products": [],
     "recipes": [],
     "database_results": [],
+    "recipe_selected_products": [],
+    "menus": [],
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -353,13 +355,64 @@ def recipes_dataframe(recipes):
     return pd.DataFrame(rows)
 
 
-def make_excel_export(region="US"):
+def uk_label_review_rows():
+    rows = []
+    for s in source_options():
+        ingredient_text = s.get("ingredients_text", "")
+        detected = detect_uk_allergens(ingredient_text)
+        emphasized = emphasise_uk_allergens_in_text(ingredient_text)
+        issues = []
+        if not s.get("consumer_name"):
+            issues.append("Missing consumer-facing food name")
+        if "Not available" in ingredient_text or not ingredient_text.strip():
+            issues.append("Missing full ingredients list")
+        if detected and ingredient_text == emphasized:
+            issues.append("Detected allergens may not be emphasized in the source ingredient list")
+        if s.get("review_flags"):
+            issues.extend(s.get("review_flags", []))
+        rows.append({
+            "Type": s["type"],
+            "Internal Name": s["internal_name"],
+            "Food Name": s["consumer_name"],
+            "Detected UK 14 Allergens": ", ".join(detected) if detected else "None detected",
+            "Ingredients With UK Allergen Emphasis": emphasized,
+            "Issues": "; ".join(issues) if issues else "None flagged by automated checklist",
+            "Review Status": "Needs human compliance review before packaging use",
+        })
+    return rows
+
+
+def uk_label_copy_rows():
+    rows = []
+    for s in source_options():
+        panel = uk_panel(s["consumer_name"], s["nutrition"], s.get("serving", "1 serving"))
+        ingredients = emphasise_uk_allergens_in_text(s.get("ingredients_text", "Ingredients: Not available."))
+        allergens = allergen_declaration(s, "UK")
+        rows.append({
+            "Type": s["type"],
+            "Internal Name": s["internal_name"],
+            "Food Name": s["consumer_name"],
+            "UK Nutrition Panel": panel,
+            "UK Ingredients List": ingredients,
+            "UK Allergen Declaration": allergens,
+            "Combined Copy Text": "\n\n".join([s["consumer_name"], panel, ingredients, allergens]),
+        })
+    return rows
+
+
+def make_excel_export(region="UK"):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         if st.session_state.products:
             products_dataframe(st.session_state.products).to_excel(writer, sheet_name="Products", index=False)
         if st.session_state.recipes:
             recipes_dataframe(st.session_state.recipes).to_excel(writer, sheet_name="Recipes", index=False)
+        review_rows = uk_label_review_rows()
+        if review_rows:
+            pd.DataFrame(review_rows).to_excel(writer, sheet_name="UK_Natashas_Review", index=False)
+        copy_rows = uk_label_copy_rows()
+        if copy_rows:
+            pd.DataFrame(copy_rows).to_excel(writer, sheet_name="UK_Label_Copy", index=False)
     output.seek(0)
     return output.getvalue()
 
@@ -495,6 +548,41 @@ def off_to_product(item):
         "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "confidence": 70,
     }
+
+
+def local_saved_search(query):
+    q = (query or "").lower().strip()
+    results = []
+    for p in st.session_state.products:
+        haystack = " ".join([
+            internal_name(p),
+            display_name(p),
+            p.get("supplier", ""),
+            " ".join(p.get("ingredients", [])),
+            " ".join(p.get("allergens", [])),
+        ]).lower()
+        if not q or q in haystack:
+            item = dict(p)
+            item["source_database"] = "Customer Database"
+            results.append(item)
+    return results
+
+
+def consolidated_database_search(query, include_customer=True, include_usda=True, include_off=True, page_size=25):
+    results = []
+    if include_customer:
+        results.extend(local_saved_search(query))
+    if include_usda:
+        for item in search_usda(query, page_size=page_size):
+            product = usda_to_product(item)
+            product["source_database"] = "USDA FoodData Central"
+            results.append(product)
+    if include_off:
+        for item in search_open_food_facts(query, page_size=page_size):
+            product = off_to_product(item)
+            product["source_database"] = "Open Food Facts"
+            results.append(product)
+    return results
 
 # -----------------------------
 # Recipes / ingredient list generation
@@ -662,13 +750,15 @@ def canada_panel(name, nutrition, serving="1 serving"):
 
 
 def uk_panel(name, nutrition, serving="1 serving"):
+    calories = nutrition.get("calories")
+    kj = round(calories * 4.184) if calories is not None else None
     salt_g = salt_from_sodium_mg(nutrition.get("sodium_mg"))
     return "\n".join([
         "NUTRITION INFORMATION — UK PREVIEW",
         name,
         f"Serving size {serving}",
         "--------------------------------",
-        f"Energy {fmt(nutrition.get('calories'), 0)} kcal",
+        f"Energy {fmt(kj, 0)} kJ / {fmt(calories, 0)} kcal",
         f"Fat {fmt(nutrition.get('total_fat_g'))}g",
         f"of which saturates {fmt(nutrition.get('saturated_fat_g'))}g",
         f"Carbohydrate {fmt(nutrition.get('total_carbs_g'))}g",
@@ -676,9 +766,8 @@ def uk_panel(name, nutrition, serving="1 serving"):
         f"Protein {fmt(nutrition.get('protein_g'))}g",
         f"Salt {fmt(salt_g)}g",
         "",
-        "Preview only — not legal/compliance approval.",
+        "UK nutrition preview. Confirm values, serving basis, rounding and PPDS status before packaging use.",
     ])
-
 
 def make_panel(region, name, nutrition, serving):
     if region == "US":
@@ -702,6 +791,7 @@ def source_options():
             "ingredients_text": f"Ingredients: {ingredients}" if ingredients else "Ingredients: Not available.",
             "allergens": p.get("allergens", []),
             "components": components,
+            "review_flags": [],
         })
     for r in st.session_state.recipes:
         sources.append({
@@ -713,6 +803,7 @@ def source_options():
             "ingredients_text": r.get("ingredient_list", "Ingredients: Not available."),
             "allergens": r.get("allergens", []),
             "components": r.get("components", []),
+            "review_flags": r.get("review_flags", []),
         })
     return sources
 
@@ -728,6 +819,38 @@ def allergen_declaration(source, region):
     if allergens:
         return f"{name}\n\nContains: {', '.join(sorted(set(allergens)))}"
     return f"{name}\n\nContains: No allergens automatically detected. Review before use."
+
+
+def menus_dataframe(menus):
+    rows = []
+    for m in menus:
+        for category, recipes in m.get("categories", {}).items():
+            for recipe_name in recipes:
+                rows.append({
+                    "Menu Name": m.get("name", "Unnamed Menu"),
+                    "Category": category,
+                    "Recipe": recipe_name,
+                    "Created At": m.get("created_at", ""),
+                })
+        if not m.get("categories"):
+            rows.append({"Menu Name": m.get("name", "Unnamed Menu"), "Category": "", "Recipe": "", "Created At": m.get("created_at", "")})
+    return pd.DataFrame(rows)
+
+
+def menu_label_block(menu):
+    lines = [menu.get("name", "Unnamed Menu"), ""]
+    for category, recipe_names in menu.get("categories", {}).items():
+        lines.append(category.upper())
+        if recipe_names:
+            for recipe_name in recipe_names:
+                recipe = get_recipe(recipe_name)
+                consumer = display_name(recipe) if recipe else recipe_name
+                allergens = ", ".join(recipe.get("allergens", [])) if recipe and recipe.get("allergens") else "No allergens automatically detected"
+                lines.append(f"- {consumer} — Allergens: {allergens}")
+        else:
+            lines.append("- No recipes assigned")
+        lines.append("")
+    return "\n".join(lines).strip()
 
 # -----------------------------
 # Demo data
@@ -754,11 +877,13 @@ with st.sidebar:
         st.session_state.products = []
         st.session_state.recipes = []
         st.session_state.database_results = []
+        st.session_state.menus = []
         st.success("Cleared.")
         st.rerun()
     st.markdown("---")
     st.write("Products:", len(st.session_state.products))
     st.write("Recipes:", len(st.session_state.recipes))
+    st.write("Menus:", len(st.session_state.menus))
     if not usda_api_key():
         st.info("Optional: add USDA_API_KEY in Streamlit Secrets for USDA search.")
 
@@ -768,12 +893,11 @@ with st.sidebar:
 tabs = st.tabs([
     "Dashboard",
     "Add Product",
-    "Database Search",
     "Product Detail",
     "Recipe Builder",
+    "Create Menu",
     "Nutrition Panels",
     "Copy Center",
-    "UK PPDS Review",
     "Export",
 ])
 
@@ -788,6 +912,9 @@ with tabs[0]:
     if st.session_state.recipes:
         st.subheader("Saved Recipes")
         st.dataframe(recipes_dataframe(st.session_state.recipes), use_container_width=True)
+    if st.session_state.menus:
+        st.subheader("Saved Menus")
+        st.dataframe(menus_dataframe(st.session_state.menus), use_container_width=True)
 
 with tabs[1]:
     st.header("Add Product / Ingredient")
@@ -806,33 +933,6 @@ with tabs[1]:
             st.json(product)
 
 with tabs[2]:
-    st.header("Database Search")
-    query = st.text_input("Search USDA and Open Food Facts", placeholder="Example: wheat flour")
-    c1, c2, c3 = st.columns(3)
-    use_usda = c1.checkbox("USDA", value=True)
-    use_off = c2.checkbox("Open Food Facts", value=True)
-    page_size = c3.number_input("Results per source", min_value=10, max_value=100, value=50, step=10)
-    if st.button("Search Databases") and query:
-        results = []
-        if use_usda:
-            for item in search_usda(query, page_size=page_size):
-                results.append(usda_to_product(item))
-        if use_off:
-            for item in search_open_food_facts(query, page_size=page_size):
-                results.append(off_to_product(item))
-        st.session_state.database_results = results
-    if st.session_state.database_results:
-        st.dataframe(products_dataframe(st.session_state.database_results), use_container_width=True)
-        choice = st.selectbox("Import result as product", [internal_name(p) for p in st.session_state.database_results])
-        if st.button("Import Selected Result"):
-            selected = next(p for p in st.session_state.database_results if internal_name(p) == choice)
-            selected = dict(selected)
-            selected["id"] = f"P{len(st.session_state.products) + 1:04d}"
-            st.session_state.products.append(selected)
-            st.success("Imported.")
-            st.rerun()
-
-with tabs[3]:
     st.header("Product Detail")
     if not st.session_state.products:
         st.info("Add products first.")
@@ -853,7 +953,7 @@ with tabs[3]:
             st.success("Deleted.")
             st.rerun()
 
-with tabs[4]:
+with tabs[3]:
     st.header("Recipe Builder with Subrecipes")
     if not st.session_state.products:
         st.info("Add products first.")
@@ -864,8 +964,63 @@ with tabs[4]:
         servings = c1.number_input("Number of servings", min_value=1.0, value=1.0, step=0.5)
         portion_description = c2.text_input("Portion description", value="1 serving")
 
-        st.subheader("Add Products / Ingredients")
-        selected_products = st.multiselect("Products", [internal_name(p) for p in st.session_state.products])
+        st.subheader("Unified Ingredient/Product Search")
+        st.caption("Use one search to find customer-added products/ingredients, USDA FoodData Central entries, and Open Food Facts products. Add any result directly to this recipe. External results are automatically imported into your customer database when added.")
+
+        search_query = st.text_input("Search all ingredient/product databases", placeholder="Example: chicken breast, wheat flour, cheddar", key="recipe_consolidated_search")
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        include_customer = sc1.checkbox("Customer database", value=True, key="recipe_search_customer")
+        include_usda = sc2.checkbox("USDA", value=True, key="recipe_search_usda")
+        include_off = sc3.checkbox("Open Food Facts", value=True, key="recipe_search_off")
+        search_count = sc4.number_input("Results/source", min_value=5, max_value=100, value=25, step=5, key="recipe_search_count")
+
+        csearch1, csearch2 = st.columns(2)
+        if csearch1.button("Search All Sources") and search_query:
+            st.session_state.database_results = consolidated_database_search(
+                search_query,
+                include_customer=include_customer,
+                include_usda=include_usda,
+                include_off=include_off,
+                page_size=int(search_count),
+            )
+        if csearch2.button("Show All Customer Products"):
+            st.session_state.database_results = local_saved_search("")
+
+        if st.session_state.database_results:
+            result_rows = products_dataframe(st.session_state.database_results)
+            result_rows.insert(0, "Source", [p.get("source_database", "Customer Database") for p in st.session_state.database_results])
+            st.dataframe(result_rows, use_container_width=True)
+
+            result_labels = [f"{p.get('source_database', 'Customer Database')}: {internal_name(p)}" for p in st.session_state.database_results]
+            add_choice = st.selectbox("Choose a result to add to this recipe", result_labels, key="recipe_add_result_choice")
+            if st.button("Add Selected Result to Recipe"):
+                selected = dict(st.session_state.database_results[result_labels.index(add_choice)])
+                source = selected.get("source_database", "Customer Database")
+
+                if source != "Customer Database":
+                    selected["id"] = f"P{len(st.session_state.products) + 1:04d}"
+                    selected["source_database"] = source
+                    existing = {internal_name(p) for p in st.session_state.products}
+                    if internal_name(selected) in existing:
+                        selected["internal_name"] = f"{internal_name(selected)} imported {len(st.session_state.products) + 1}"
+                        selected["name"] = selected["internal_name"]
+                    st.session_state.products.append(selected)
+
+                selected_name = internal_name(selected)
+                if selected_name not in st.session_state.recipe_selected_products:
+                    st.session_state.recipe_selected_products.append(selected_name)
+                st.success(f"Added {selected_name} to this recipe.")
+                st.rerun()
+
+        st.subheader("Recipe Ingredients Selected from Unified Search")
+        selected_products = st.multiselect(
+            "Products / Ingredients in this recipe",
+            [internal_name(p) for p in st.session_state.products],
+            default=[name for name in st.session_state.recipe_selected_products if get_product(name)],
+            key="recipe_selected_products_widget",
+        )
+        st.session_state.recipe_selected_products = selected_products
+
         product_items = []
         for name in selected_products:
             c1, c2 = st.columns(2)
@@ -937,19 +1092,79 @@ with tabs[4]:
                 st.success("Deleted.")
                 st.rerun()
 
+
+with tabs[4]:
+    st.header("Create Menu")
+    st.caption("Group selected saved recipes into menu categories for review, export, and label planning.")
+
+    if not st.session_state.recipes:
+        st.info("Save at least one recipe before creating a menu.")
+    else:
+        menu_name = st.text_input("Menu name", placeholder="Example: Spring Lunch Menu")
+        default_categories = "Starters, Mains, Sides, Desserts, Beverages"
+        categories_text = st.text_input("Menu categories", value=default_categories, help="Separate categories with commas. You can use any category names.")
+        categories = [clean_text(c) for c in categories_text.split(",") if clean_text(c)]
+        recipe_labels = [internal_name(r) for r in st.session_state.recipes]
+
+        assignments = {}
+        for category in categories:
+            assignments[category] = st.multiselect(f"Recipes in {category}", recipe_labels, key=f"menu_cat_{category}")
+
+        if st.button("Save Menu"):
+            if not clean_text(menu_name):
+                st.warning("Add a menu name first.")
+            elif not any(assignments.values()):
+                st.warning("Select at least one recipe for the menu.")
+            else:
+                menu = {
+                    "id": f"M{len(st.session_state.menus) + 1:04d}",
+                    "name": clean_text(menu_name),
+                    "categories": assignments,
+                    "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                }
+                st.session_state.menus.append(menu)
+                st.success("Menu saved.")
+                st.rerun()
+
+        if st.session_state.menus:
+            st.subheader("Saved Menus")
+            menu_choice = st.selectbox("Open menu", [m["name"] for m in st.session_state.menus])
+            menu = next(m for m in st.session_state.menus if m["name"] == menu_choice)
+            st.dataframe(menus_dataframe([menu]), use_container_width=True)
+            block = menu_label_block(menu)
+            st.text_area("Copy-ready menu summary", value=block, height=300)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.download_button("Download Menu CSV", data=menus_dataframe([menu]).to_csv(index=False), file_name="menu.csv", mime="text/csv")
+            with c2:
+                st.download_button("Download Menu TXT", data=block, file_name="menu_summary.txt", mime="text/plain")
+
+            if st.button("Delete Selected Menu"):
+                st.session_state.menus = [m for m in st.session_state.menus if m["name"] != menu_choice]
+                st.success("Menu deleted.")
+                st.rerun()
+
 with tabs[5]:
-    st.header("Nutrition Facts Panels")
+    st.header("UK Nutrition & PPDS Label Panels")
     sources = source_options()
     if not sources:
         st.info("Add products or recipes first.")
     else:
         label = st.selectbox("Choose product or recipe", [f"{s['type']}: {s['consumer_name']} ({s['internal_name']})" for s in sources])
         source = sources[[f"{s['type']}: {s['consumer_name']} ({s['internal_name']})" for s in sources].index(label)]
-        region = st.selectbox("Region", ["US", "Canada", "UK"])
         serving = st.text_input("Serving size text", value=source.get("serving", "1 serving"))
-        panel = make_panel(region, source["consumer_name"], source["nutrition"], serving)
-        st.text_area("Panel preview", value=panel, height=420)
-        st.download_button("Download panel TXT", data=panel, file_name="nutrition_panel.txt", mime="text/plain")
+        panel = uk_panel(source["consumer_name"], source["nutrition"], serving)
+        ingredients = emphasise_uk_allergens_in_text(source.get("ingredients_text", "Ingredients: Not available."))
+        allergens = allergen_declaration(source, "UK")
+        review_rows = [r for r in uk_label_review_rows() if r["Internal Name"] == source["internal_name"] and r["Type"] == source["type"]]
+        review_text = review_rows[0]["Issues"] if review_rows else "Needs human compliance review before packaging use"
+        label_bundle = "\n\n".join([source["consumer_name"], panel, ingredients, allergens, "Review: " + review_text])
+        st.text_area("UK nutrition panel preview", value=panel, height=300)
+        st.text_area("UK PPDS ingredient list with allergen emphasis", value=ingredients, height=170)
+        st.text_area("UK allergen declaration", value=allergens, height=120)
+        st.text_area("Combined UK label block", value=label_bundle, height=520)
+        st.download_button("Download UK label TXT", data=label_bundle, file_name="uk_ppds_label_preview.txt", mime="text/plain")
 
 with tabs[6]:
     st.header("Copy Center")
@@ -969,50 +1184,25 @@ with tabs[6]:
         panel = make_panel(region, source["consumer_name"], source["nutrition"], serving)
         allergens = allergen_declaration(source, region)
         bundle = "\n\n".join(["=== NUTRITION PANEL ===", panel, "=== INGREDIENT LIST ===", ingredient_text, "=== ALLERGEN DECLARATION ===", allergens])
-        st.text_area("Copy nutrition panel", value=panel, height=320)
-        st.text_area("Copy ingredient list", value=ingredient_text, height=150)
-        st.text_area("Copy allergen declaration", value=allergens, height=120)
+        st.text_area("Copy UK nutrition panel", value=panel, height=320)
+        st.text_area("Copy UK ingredient list with allergen emphasis", value=ingredient_text, height=150)
+        st.text_area("Copy UK allergen declaration", value=allergens, height=120)
         st.text_area("Copy all label text", value=bundle, height=520)
         st.download_button("Download copy-ready label TXT", data=bundle, file_name="copy_ready_label.txt", mime="text/plain")
 
 with tabs[7]:
-    st.header("UK PPDS / Natasha's Law Review")
-    sources = source_options()
-    if not sources:
-        st.info("Add products or recipes first.")
-    else:
-        rows = []
-        for s in sources:
-            ingredient_text = s.get("ingredients_text", "")
-            detected = detect_uk_allergens(ingredient_text)
-            emphasized = emphasise_uk_allergens_in_text(ingredient_text)
-            issues = []
-            if not s.get("consumer_name"):
-                issues.append("Missing consumer-facing food name")
-            if "Not available" in ingredient_text or not ingredient_text.strip():
-                issues.append("Missing full ingredients list")
-            if detected and ingredient_text == emphasized:
-                issues.append("Detected allergens may not be emphasized")
-            rows.append({
-                "Type": s["type"],
-                "Internal Name": s["internal_name"],
-                "Food Name": s["consumer_name"],
-                "Detected UK 14 Allergens": ", ".join(detected) if detected else "None detected",
-                "Generated Ingredients With Emphasis": emphasized,
-                "Issues": "; ".join(issues) if issues else "None flagged by automated checklist",
-                "Review Status": "Needs human compliance review",
-            })
-        df = pd.DataFrame(rows)
-        st.dataframe(df, use_container_width=True)
-        st.download_button("Download UK PPDS Review CSV", data=df.to_csv(index=False), file_name="uk_ppds_review.csv", mime="text/csv")
-
-with tabs[8]:
-    st.header("Export")
+    st.header("UK Natasha's Law / Nutrition Export")
     if not st.session_state.products and not st.session_state.recipes:
         st.info("No data to export.")
     else:
+        st.caption("Exports include UK nutrition information, ingredient lists with UK allergen emphasis, and a Natasha's Law/PPDS review aid. This is not legal certification; final packaging should be reviewed by a qualified compliance professional.")
         if st.session_state.products:
             st.download_button("Download Products CSV", data=products_dataframe(st.session_state.products).to_csv(index=False), file_name="products.csv", mime="text/csv")
         if st.session_state.recipes:
             st.download_button("Download Recipes CSV", data=recipes_dataframe(st.session_state.recipes).to_csv(index=False), file_name="recipes.csv", mime="text/csv")
-        st.download_button("Download Excel Workbook", data=make_excel_export(), file_name="food_intelligence_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        if st.session_state.menus:
+            st.download_button("Download Menus CSV", data=menus_dataframe(st.session_state.menus).to_csv(index=False), file_name="menus.csv", mime="text/csv")
+        review_df = pd.DataFrame(uk_label_review_rows())
+        if not review_df.empty:
+            st.download_button("Download UK Natasha's Law Review CSV", data=review_df.to_csv(index=False), file_name="uk_natashas_law_review.csv", mime="text/csv")
+        st.download_button("Download UK Label Workbook", data=make_excel_export(), file_name="uk_food_label_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
