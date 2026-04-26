@@ -2,3 +2,5 @@ streamlit
 pandas
 requests
 pypdf
+python-docx
+openpyxl
