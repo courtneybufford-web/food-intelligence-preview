@@ -466,6 +466,40 @@ def totals(items):
     return t, sorted(allergens), ", ".join(ingredients)
 
 
+
+def scale_total_nutrition(total, factor):
+    return {k: round(safe_float(v) * factor, 3) for k, v in total.items()}
+
+
+def calculate_label_nutrition(total, servings, total_weight_g, serving_option, serving_size_value=1.0, serving_size_unit="serving", custom_serving_weight_g=0.0):
+    """Return nutrition values to show on the label and the label serving text.
+
+    The FDA-style default is per serving. Other options are provided for review,
+    formulation, and non-retail/internal labels.
+    """
+    servings = max(int(servings or 1), 1)
+    total_weight_g = safe_float(total_weight_g)
+    serving_size_value = safe_float(serving_size_value) or 1.0
+    serving_size_unit = serving_size_unit or "serving"
+
+    if serving_option == "Per 100 g":
+        factor = 100.0 / total_weight_g if total_weight_g > 0 else 0.0
+        return scale_total_nutrition(total, factor), "100 g", servings
+
+    if serving_option == "Per full recipe / container":
+        return scale_total_nutrition(total, 1.0), "1 container", 1
+
+    if serving_option == "Custom serving weight (g)":
+        custom_g = safe_float(custom_serving_weight_g)
+        factor = custom_g / total_weight_g if total_weight_g > 0 and custom_g > 0 else 1.0 / servings
+        label = f"{custom_g:g} g" if custom_g > 0 else f"{serving_size_value:g} {serving_size_unit}"
+        display_servings = round(total_weight_g / custom_g, 1) if total_weight_g > 0 and custom_g > 0 else servings
+        return scale_total_nutrition(total, factor), label, display_servings
+
+    # FDA/recommended default: per serving/container serving count.
+    return scale_total_nutrition(total, 1.0 / servings), f"{serving_size_value:g} {serving_size_unit}", servings
+
+
 def prediction_score(product, query):
     if not query:
         return 0
@@ -1644,33 +1678,51 @@ with tabs[4]:
         recipe_name = st.text_input("Recipe name")
         servings = st.number_input("Servings", min_value=1, value=1)
 
-        st.markdown("**Serving size**")
-        ss_col1, ss_col2 = st.columns([1, 1])
+        st.markdown("**Serving options**")
+        serving_option = st.selectbox(
+            "Nutrition label basis",
+            [
+                "Per serving (FDA default)",
+                "Per 100 g",
+                "Per full recipe / container",
+                "Custom serving weight (g)",
+            ],
+            help="FDA Nutrition Facts labels are normally per serving. Other options help with internal review or non-retail/export workflows.",
+        )
+        ss_col1, ss_col2, ss_col3 = st.columns([1, 1, 1])
         serving_size_value = ss_col1.number_input("Serving size value", min_value=0.0, value=1.0, step=0.25)
         serving_size_unit = ss_col2.selectbox("Serving size unit", COMMON_UNITS, index=COMMON_UNITS.index("serving") if "serving" in COMMON_UNITS else 0)
-        serving_size_label = f"{serving_size_value:g} {serving_size_unit}" if serving_size_value else "1 serving"
+        custom_serving_weight_g = ss_col3.number_input("Custom serving weight (g)", min_value=0.0, value=0.0, step=1.0, disabled=serving_option != "Custom serving weight (g)")
 
         total, allergens, ingredient_list = totals(updated_items)
-        per = {k: round(v / servings, 2) for k, v in total.items()}
+        total_weight_g = round(sum(item_grams(item) for item in updated_items), 2)
+        serving_weight_g = round(total_weight_g / max(servings, 1), 2)
+        per, serving_size_label, label_servings = calculate_label_nutrition(
+            total,
+            servings,
+            total_weight_g,
+            serving_option,
+            serving_size_value,
+            serving_size_unit,
+            custom_serving_weight_g,
+        )
 
-
-        serving_weight_g = round(sum(item_grams(item) for item in updated_items) / max(servings, 1), 2)
-        panel_text = nutrition_facts_panel_text(recipe_name or "Recipe", per, servings, serving_weight_g, serving_size_label)
-
-        st.subheader("Nutrition Facts Label")
+        st.subheader("Nutrition Facts Panel Preview")
         label_cols = st.columns([1, 1])
         label_size = label_cols[0].selectbox("Label size", ["2 x 4 in", "3 x 5 in", "4 x 6 in", "5 x 7 in"], index=0, key="current_label_size")
         label_dpi = label_cols[1].selectbox("Print DPI", [203, 300, 600], index=1, key="current_label_dpi")
+        panel_text = nutrition_facts_panel_text(recipe_name or "Recipe", per, label_servings, serving_weight_g, serving_size_label)
         label_png = create_nutrition_facts_png(panel_text, label_size, label_dpi)
         if label_png:
-            st.image(label_png, caption=f"Print-ready Nutrition Facts label — {label_size}, {label_dpi} DPI")
+            st.image(label_png, caption=f"Nutrition Facts label preview — {label_size}, {label_dpi} DPI")
             image_clipboard_tools(label_png, key="copy_current_label_image")
             st.download_button("Download print-ready PNG label", label_png, file_name=f"{(recipe_name or 'recipe').replace(' ', '_')}_nutrition_facts_{label_dpi}dpi.png", mime="image/png")
+            panel_pdf = create_nutrition_facts_pdf(recipe_name or "Recipe", panel_text)
+            if panel_pdf:
+                st.download_button("Download Nutrition Facts Panel PDF", panel_pdf, file_name=f"{(recipe_name or 'recipe').replace(' ', '_')}_nutrition_facts_panel.pdf", mime="application/pdf")
             zpl_text = create_zpl_from_panel(panel_text, label_size, 203)
             st.download_button("Download Zebra/ZPL label file", zpl_text, file_name=f"{(recipe_name or 'recipe').replace(' ', '_')}_nutrition_facts.zpl", mime="text/plain")
-            if st.toggle("Show raw text version", value=False, key="show_current_raw_panel"):
-                st.text_area("Raw Nutrition Facts text", panel_text, height=360)
-            st.caption("Default view is the print-ready image label. Use the toggle only when you need the raw text version. If image copy is blocked by the browser, use Download PNG.")
+            st.caption("Copy image uses the browser clipboard when supported. Download PNG is the reliable print-ready fallback.")
         else:
             st.warning("PNG label export requires Pillow. Add pillow to requirements.txt.")
 
@@ -1686,7 +1738,7 @@ with tabs[4]:
         if st.button("Save Recipe"):
             if recipe_name:
                 st.session_state.recipe_items = updated_items
-                st.session_state.saved_recipes.append({"name": recipe_name, "servings": servings, "serving_size_value": serving_size_value, "serving_size_unit": serving_size_unit, "serving_size_label": serving_size_label, "items": list(updated_items), "label": label, "nutrition_per_serving": per, "nutrition_facts_panel": panel_text, "serving_weight_g": serving_weight_g})
+                st.session_state.saved_recipes.append({"name": recipe_name, "servings": label_servings, "original_servings": servings, "serving_option": serving_option, "serving_size_value": serving_size_value, "serving_size_unit": serving_size_unit, "serving_size_label": serving_size_label, "items": list(updated_items), "label": label, "nutrition_per_serving": per, "nutrition_facts_panel": panel_text, "serving_weight_g": serving_weight_g})
                 st.success("Recipe saved")
             else:
                 st.warning("Add a recipe name")
@@ -1703,21 +1755,22 @@ with tabs[5]:
                 st.text_area("Label", r["label"], height=220)
                 st.download_button("Download label text", r["label"], file_name=f"{r['name']}_label.txt")
 
-                st.subheader("Nutrition Facts Label")
+                st.subheader("Nutrition Facts Panel")
                 panel_per = r.get("nutrition_per_serving", {})
-                panel_text = r.get("nutrition_facts_panel") or nutrition_facts_panel_text(r.get("name", "Recipe"), panel_per, r.get("servings", 1), r.get("serving_weight_g", 0), r.get("serving_size_label", "1 serving"))
+                panel_text = r.get("nutrition_facts_panel") or nutrition_facts_panel_text(r.get("name", "Recipe"), panel_per, r.get("servings", 1), r.get("serving_weight_g", 0))
+                panel_pdf = create_nutrition_facts_pdf(r.get("name", "Recipe"), panel_text)
+                if panel_pdf:
+                    st.download_button("Download Nutrition Facts PDF", panel_pdf, file_name=f"{r['name']}_nutrition_facts.pdf", mime="application/pdf")
                 saved_cols = st.columns([1, 1])
                 saved_size = saved_cols[0].selectbox("Saved label size", ["2 x 4 in", "3 x 5 in", "4 x 6 in", "5 x 7 in"], index=0, key=f"saved_label_size_{r['name']}")
                 saved_dpi = saved_cols[1].selectbox("Saved print DPI", [203, 300, 600], index=1, key=f"saved_label_dpi_{r['name']}")
                 saved_png = create_nutrition_facts_png(panel_text, saved_size, saved_dpi)
                 if saved_png:
-                    st.image(saved_png, caption=f"Print-ready Nutrition Facts label — {saved_size}, {saved_dpi} DPI")
+                    st.image(saved_png, caption=f"Print-ready label — {saved_size}, {saved_dpi} DPI")
                     image_clipboard_tools(saved_png, key=f"copy_saved_label_image_{re.sub(r'[^A-Za-z0-9_]+', '_', r['name'])}")
                     st.download_button("Download print-ready PNG", saved_png, file_name=f"{r['name']}_nutrition_facts_{saved_dpi}dpi.png", mime="image/png")
                     saved_zpl = create_zpl_from_panel(panel_text, saved_size, 203)
                     st.download_button("Download Zebra/ZPL label", saved_zpl, file_name=f"{r['name']}_nutrition_facts.zpl", mime="text/plain")
-                    if st.toggle("Show raw text version", value=False, key=f"show_saved_raw_panel_{r['name']}"):
-                        st.text_area("Raw Nutrition Facts text", panel_text, height=360, key=f"saved_raw_panel_{r['name']}")
 
         st.divider()
         st.subheader("Batch Print-Ready Label Export")
