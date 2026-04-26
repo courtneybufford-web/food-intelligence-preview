@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import requests
 import re
@@ -809,96 +810,247 @@ def create_pdf_export(recipes):
     return output.getvalue()
 
 
+
+FDA_DV = {
+    "total_fat_g": 78,
+    "saturated_fat_g": 20,
+    "cholesterol_mg": 300,
+    "sodium_mg": 2300,
+    "total_carbs_g": 275,
+    "dietary_fiber_g": 28,
+    "added_sugars_g": 50,
+    "protein_g": 50,
+    "vitamin_d_mcg": 20,
+    "calcium_mg": 1300,
+    "iron_mg": 18,
+    "potassium_mg": 4700,
+}
+
+
+def _nf_value(per_serving, *keys):
+    """Read nutrient values from either older app keys or expanded FDA keys."""
+    for key in keys:
+        if key in per_serving and per_serving.get(key) not in [None, ""]:
+            return safe_float(per_serving.get(key))
+    return 0.0
+
+
+def _round_nearest(value, increment):
+    value = safe_float(value)
+    return round(round(value / increment) * increment, 3) if increment else value
+
+
+def _fmt_number(value):
+    value = safe_float(value)
+    if abs(value - int(value)) < 0.0001:
+        return str(int(value))
+    return str(round(value, 1)).rstrip("0").rstrip(".")
+
+
+def fda_round_calories(calories):
+    calories = safe_float(calories)
+    if calories < 5:
+        return 0
+    if calories <= 50:
+        return int(_round_nearest(calories, 5))
+    return int(_round_nearest(calories, 10))
+
+
+def fda_round_fat_grams(value):
+    value = safe_float(value)
+    if value < 0.5:
+        return "0g"
+    if value < 5:
+        return f"{_fmt_number(_round_nearest(value, 0.5))}g"
+    return f"{int(_round_nearest(value, 1))}g"
+
+
+def fda_round_carb_grams(value, allow_less_than=True):
+    value = safe_float(value)
+    if value < 0.5:
+        return "0g"
+    if value < 1 and allow_less_than:
+        return "<1g"
+    return f"{int(_round_nearest(value, 1))}g"
+
+
+def fda_round_cholesterol(value):
+    value = safe_float(value)
+    if value < 2:
+        return "0mg"
+    if value <= 5:
+        return "<5mg"
+    return f"{int(_round_nearest(value, 5))}mg"
+
+
+def fda_round_sodium(value):
+    value = safe_float(value)
+    if value < 5:
+        return "0mg"
+    if value <= 140:
+        return f"{int(_round_nearest(value, 5))}mg"
+    return f"{int(_round_nearest(value, 10))}mg"
+
+
+def fda_round_mineral(value, unit):
+    value = safe_float(value)
+    if value == 0:
+        return f"0{unit}"
+    if unit == "mcg":
+        return f"{_fmt_number(_round_nearest(value, 0.1))}{unit}"
+    return f"{_fmt_number(_round_nearest(value, 1))}{unit}"
+
+
+def pdv(value, dv):
+    value = safe_float(value)
+    if dv <= 0:
+        return ""
+    return f"{int(round(value / dv * 100))}%"
+
+
+def build_fda_nutrients(per_serving):
+    sodium_mg = _nf_value(per_serving, "sodium_mg")
+    if sodium_mg == 0:
+        salt_g = _nf_value(per_serving, "salt", "salt_g")
+        sodium_mg = salt_g * 1000 / 2.5 if salt_g else 0
+
+    return {
+        "calories": _nf_value(per_serving, "calories"),
+        "total_fat_g": _nf_value(per_serving, "total_fat_g", "fat"),
+        "saturated_fat_g": _nf_value(per_serving, "saturated_fat_g", "saturated_fat"),
+        "trans_fat_g": _nf_value(per_serving, "trans_fat_g", "trans_fat"),
+        "cholesterol_mg": _nf_value(per_serving, "cholesterol_mg", "cholesterol"),
+        "sodium_mg": sodium_mg,
+        "total_carbs_g": _nf_value(per_serving, "total_carbs_g", "carbs"),
+        "dietary_fiber_g": _nf_value(per_serving, "dietary_fiber_g", "fiber"),
+        "total_sugars_g": _nf_value(per_serving, "total_sugars_g", "sugars"),
+        "added_sugars_g": _nf_value(per_serving, "added_sugars_g", "added_sugars"),
+        "protein_g": _nf_value(per_serving, "protein_g", "protein"),
+        "vitamin_d_mcg": _nf_value(per_serving, "vitamin_d_mcg", "vitamin_d"),
+        "calcium_mg": _nf_value(per_serving, "calcium_mg", "calcium"),
+        "iron_mg": _nf_value(per_serving, "iron_mg", "iron"),
+        "potassium_mg": _nf_value(per_serving, "potassium_mg", "potassium"),
+    }
+
+
 def nutrition_facts_panel_text(recipe_name, per_serving, servings=1, serving_weight_g=0, serving_size_label=None):
-    calories = safe_float(per_serving.get("calories", 0))
-    fat = safe_float(per_serving.get("fat", 0))
-    carbs = safe_float(per_serving.get("carbs", 0))
-    protein = safe_float(per_serving.get("protein", 0))
-    salt = safe_float(per_serving.get("salt", 0))
-    sodium_mg = round(salt * 1000 / 2.5, 0) if salt else 0
+    n = build_fda_nutrients(per_serving)
     serving_line = serving_size_label or (f"{serving_weight_g:g} g" if serving_weight_g else "1 serving")
     return f"""Nutrition Facts
 {recipe_name}
+{servings} servings per container
 Serving size {serving_line}
-Servings per recipe {servings}
 
-Amount Per Serving
-Calories {calories:g}
+Amount per serving
+Calories {fda_round_calories(n['calories'])}
 
-Total Fat {fat:g}g
-Saturated Fat 0g
-Trans Fat 0g
-Cholesterol 0mg
-Sodium {sodium_mg:g}mg
-Total Carbohydrate {carbs:g}g
-Dietary Fiber 0g
-Total Sugars 0g
-Includes 0g Added Sugars
-Protein {protein:g}g
+% Daily Value*
+Total Fat {fda_round_fat_grams(n['total_fat_g'])} {pdv(n['total_fat_g'], FDA_DV['total_fat_g'])}
+  Saturated Fat {fda_round_fat_grams(n['saturated_fat_g'])} {pdv(n['saturated_fat_g'], FDA_DV['saturated_fat_g'])}
+  Trans Fat {fda_round_fat_grams(n['trans_fat_g'])}
+Cholesterol {fda_round_cholesterol(n['cholesterol_mg'])} {pdv(n['cholesterol_mg'], FDA_DV['cholesterol_mg'])}
+Sodium {fda_round_sodium(n['sodium_mg'])} {pdv(n['sodium_mg'], FDA_DV['sodium_mg'])}
+Total Carbohydrate {fda_round_carb_grams(n['total_carbs_g'])} {pdv(n['total_carbs_g'], FDA_DV['total_carbs_g'])}
+  Dietary Fiber {fda_round_carb_grams(n['dietary_fiber_g'])} {pdv(n['dietary_fiber_g'], FDA_DV['dietary_fiber_g'])}
+  Total Sugars {fda_round_carb_grams(n['total_sugars_g'])}
+    Includes {fda_round_carb_grams(n['added_sugars_g'])} Added Sugars {pdv(n['added_sugars_g'], FDA_DV['added_sugars_g'])}
+Protein {fda_round_carb_grams(n['protein_g'], allow_less_than=False)}
 
-Vitamin D 0mcg
-Calcium 0mg
-Iron 0mg
-Potassium 0mg
+Vitamin D {fda_round_mineral(n['vitamin_d_mcg'], 'mcg')} {pdv(n['vitamin_d_mcg'], FDA_DV['vitamin_d_mcg'])}
+Calcium {fda_round_mineral(n['calcium_mg'], 'mg')} {pdv(n['calcium_mg'], FDA_DV['calcium_mg'])}
+Iron {fda_round_mineral(n['iron_mg'], 'mg')} {pdv(n['iron_mg'], FDA_DV['iron_mg'])}
+Potassium {fda_round_mineral(n['potassium_mg'], 'mg')} {pdv(n['potassium_mg'], FDA_DV['potassium_mg'])}
 
-* Review all values, serving size, rounding, and required nutrients before commercial label use.
+* The % Daily Value tells you how much a nutrient in a serving of food contributes to a daily diet. 2,000 calories a day is used for general nutrition advice.
+Compliance note: FDA-style draft only. Verify serving size, RACC/category, lab/database values, rounding, ingredient statement, allergen declaration, and claims before commercial label use.
 """
 
 
 def render_nutrition_facts_panel(recipe_name, per_serving, servings=1, serving_weight_g=0, serving_size_label=None):
-    calories = safe_float(per_serving.get("calories", 0))
-    fat = safe_float(per_serving.get("fat", 0))
-    carbs = safe_float(per_serving.get("carbs", 0))
-    protein = safe_float(per_serving.get("protein", 0))
-    salt = safe_float(per_serving.get("salt", 0))
-    sodium_mg = round(salt * 1000 / 2.5, 0) if salt else 0
+    n = build_fda_nutrients(per_serving)
     serving_line = serving_size_label or (f"{serving_weight_g:g} g" if serving_weight_g else "1 serving")
+
+    def row(label, amount, dv="", bold=False, indent=0, italic_first=False):
+        fw = "800" if bold else "400"
+        style = f"border-bottom:1px solid #111;padding:3px 0 3px {indent}px;display:flex;justify-content:space-between;font-size:13px;"
+        if italic_first and " " in label:
+            first, rest = label.split(" ", 1)
+            label_html = f"<i>{first}</i> {rest}"
+        else:
+            label_html = label
+        return f"<div style='{style}'><span style='font-weight:{fw};'>{label_html} {amount}</span><span style='font-weight:800;'>{dv}</span></div>"
+
     html = f"""
-    <div style="max-width:360px;border:3px solid #111;padding:10px;background:white;color:#111;font-family:Arial, Helvetica, sans-serif;">
-        <div style="font-weight:900;font-size:34px;line-height:34px;border-bottom:8px solid #111;">Nutrition Facts</div>
-        <div style="font-size:14px;margin-top:4px;"><b>{recipe_name}</b></div>
-        <div style="font-size:14px;">Serving size <b>{serving_line}</b></div>
-        <div style="font-size:14px;border-bottom:5px solid #111;">Servings per recipe <b>{servings}</b></div>
-        <div style="font-size:12px;font-weight:700;margin-top:4px;">Amount Per Serving</div>
-        <div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:8px solid #111;">
-            <div style="font-weight:900;font-size:28px;">Calories</div>
-            <div style="font-weight:900;font-size:32px;">{calories:g}</div>
+    <div style="max-width:390px;border:3.5px solid #111;padding:9px;background:white;color:#111;font-family:Arial, Helvetica, sans-serif;">
+        <div style="font-weight:900;font-size:38px;line-height:36px;border-bottom:10px solid #111;letter-spacing:-1px;">Nutrition Facts</div>
+        <div style="font-size:13px;margin-top:4px;"><b>{recipe_name}</b></div>
+        <div style="font-size:13px;display:flex;justify-content:space-between;"><span>{servings} servings per container</span></div>
+        <div style="font-size:15px;border-bottom:7px solid #111;display:flex;justify-content:space-between;"><b>Serving size</b><b>{serving_line}</b></div>
+        <div style="font-size:12px;font-weight:800;margin-top:3px;">Amount per serving</div>
+        <div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:10px solid #111;">
+            <div style="font-weight:900;font-size:29px;line-height:32px;">Calories</div>
+            <div style="font-weight:900;font-size:38px;line-height:40px;">{fda_round_calories(n['calories'])}</div>
         </div>
-        <div style="font-size:12px;text-align:right;border-bottom:1px solid #111;font-weight:700;">% Daily Value*</div>
-        <div style="border-bottom:1px solid #111;"><b>Total Fat</b> {fat:g}g</div>
-        <div style="border-bottom:1px solid #111;padding-left:15px;">Saturated Fat 0g</div>
-        <div style="border-bottom:1px solid #111;padding-left:15px;"><i>Trans</i> Fat 0g</div>
-        <div style="border-bottom:1px solid #111;"><b>Cholesterol</b> 0mg</div>
-        <div style="border-bottom:1px solid #111;"><b>Sodium</b> {sodium_mg:g}mg</div>
-        <div style="border-bottom:1px solid #111;"><b>Total Carbohydrate</b> {carbs:g}g</div>
-        <div style="border-bottom:1px solid #111;padding-left:15px;">Dietary Fiber 0g</div>
-        <div style="border-bottom:1px solid #111;padding-left:15px;">Total Sugars 0g</div>
-        <div style="border-bottom:1px solid #111;padding-left:30px;">Includes 0g Added Sugars</div>
-        <div style="border-bottom:8px solid #111;"><b>Protein</b> {protein:g}g</div>
-        <div style="border-bottom:1px solid #111;">Vitamin D 0mcg</div>
-        <div style="border-bottom:1px solid #111;">Calcium 0mg</div>
-        <div style="border-bottom:1px solid #111;">Iron 0mg</div>
-        <div style="border-bottom:5px solid #111;">Potassium 0mg</div>
-        <div style="font-size:10px;margin-top:5px;">* Review serving size, rounding, and required nutrients before commercial label use.</div>
+        <div style="font-size:12px;text-align:right;border-bottom:1px solid #111;font-weight:800;">% Daily Value*</div>
+        {row('Total Fat', fda_round_fat_grams(n['total_fat_g']), pdv(n['total_fat_g'], FDA_DV['total_fat_g']), True)}
+        {row('Saturated Fat', fda_round_fat_grams(n['saturated_fat_g']), pdv(n['saturated_fat_g'], FDA_DV['saturated_fat_g']), False, 15)}
+        {row('Trans Fat', fda_round_fat_grams(n['trans_fat_g']), '', False, 15, True)}
+        {row('Cholesterol', fda_round_cholesterol(n['cholesterol_mg']), pdv(n['cholesterol_mg'], FDA_DV['cholesterol_mg']), True)}
+        {row('Sodium', fda_round_sodium(n['sodium_mg']), pdv(n['sodium_mg'], FDA_DV['sodium_mg']), True)}
+        {row('Total Carbohydrate', fda_round_carb_grams(n['total_carbs_g']), pdv(n['total_carbs_g'], FDA_DV['total_carbs_g']), True)}
+        {row('Dietary Fiber', fda_round_carb_grams(n['dietary_fiber_g']), pdv(n['dietary_fiber_g'], FDA_DV['dietary_fiber_g']), False, 15)}
+        {row('Total Sugars', fda_round_carb_grams(n['total_sugars_g']), '', False, 15)}
+        {row('Includes', fda_round_carb_grams(n['added_sugars_g']) + ' Added Sugars', pdv(n['added_sugars_g'], FDA_DV['added_sugars_g']), False, 30)}
+        <div style="border-bottom:8px solid #111;padding:3px 0;font-size:13px;"><b>Protein</b> {fda_round_carb_grams(n['protein_g'], allow_less_than=False)}</div>
+        {row('Vitamin D', fda_round_mineral(n['vitamin_d_mcg'], 'mcg'), pdv(n['vitamin_d_mcg'], FDA_DV['vitamin_d_mcg']))}
+        {row('Calcium', fda_round_mineral(n['calcium_mg'], 'mg'), pdv(n['calcium_mg'], FDA_DV['calcium_mg']))}
+        {row('Iron', fda_round_mineral(n['iron_mg'], 'mg'), pdv(n['iron_mg'], FDA_DV['iron_mg']))}
+        {row('Potassium', fda_round_mineral(n['potassium_mg'], 'mg'), pdv(n['potassium_mg'], FDA_DV['potassium_mg']))}
+        <div style="border-top:5px solid #111;font-size:10px;line-height:12px;margin-top:4px;padding-top:4px;">* The % Daily Value tells you how much a nutrient in a serving of food contributes to a daily diet. 2,000 calories a day is used for general nutrition advice.</div>
+        <div style="font-size:9px;margin-top:5px;color:#555;">Draft label. Verify serving size, lab/database values, rounding, ingredients, allergens, and claims before commercial use.</div>
     </div>
     """
     st.markdown(html, unsafe_allow_html=True)
+
+
+def copy_button(label, text, key="copy_btn"):
+    import json
+    safe_text = json.dumps(text)
+    safe_label = label.replace("'", "&apos;")
+    components.html(
+        f"""
+        <button style="background:#111;color:white;border:none;padding:8px 12px;border-radius:6px;font-weight:700;cursor:pointer;"
+            onclick='navigator.clipboard.writeText({safe_text}); this.innerText="Copied!"; setTimeout(() => this.innerText="{safe_label}", 1400);'>
+            {safe_label}
+        </button>
+        """,
+        height=45,
+    )
+
 
 
 def create_nutrition_facts_pdf(recipe_name, panel_text):
     if SimpleDocTemplate is None:
         return None
     output = BytesIO()
-    doc = SimpleDocTemplate(output, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    doc = SimpleDocTemplate(output, pagesize=letter, rightMargin=72, leftMargin=72, topMargin=36, bottomMargin=36)
     styles = getSampleStyleSheet()
-    story = [Paragraph("Nutrition Facts Panel", styles["Title"]), Spacer(1, 12)]
-    for line in panel_text.splitlines():
-        if line.strip() == "Nutrition Facts":
-            story.append(Paragraph(f"<b>{line}</b>", styles["Title"]))
-        elif line.strip():
-            story.append(Paragraph(line, styles["BodyText"]))
-        else:
-            story.append(Spacer(1, 6))
+    story = [Paragraph("Nutrition Facts Panel - FDA Style Draft", styles["Title"]), Spacer(1, 12)]
+
+    table_data = [[line] if line.strip() else [""] for line in panel_text.splitlines()]
+    table = Table(table_data, colWidths=[360])
+    table.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 2, colors.black),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("FONTNAME", (0, 0), (0, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (0, 0), 18),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    story.append(table)
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("Draft compliance aid only. Verify against FDA regulations and product-specific lab/database data before commercial use.", styles["BodyText"]))
     doc.build(story)
     output.seek(0)
     return output.getvalue()
@@ -1220,6 +1372,7 @@ with tabs[4]:
         render_nutrition_facts_panel(recipe_name or "Recipe", per, servings, serving_weight_g, serving_size_label)
         panel_text = nutrition_facts_panel_text(recipe_name or "Recipe", per, servings, serving_weight_g, serving_size_label)
         st.text_area("Copy Nutrition Facts panel text", panel_text, height=260)
+        copy_button("📋 Copy Nutrition Facts Panel", panel_text, key="copy_current_panel")
 
         panel_pdf = create_nutrition_facts_pdf(recipe_name or "Recipe", panel_text)
         if panel_pdf:
@@ -1259,6 +1412,7 @@ with tabs[5]:
                 panel_text = r.get("nutrition_facts_panel") or nutrition_facts_panel_text(r.get("name", "Recipe"), panel_per, r.get("servings", 1), r.get("serving_weight_g", 0))
                 render_nutrition_facts_panel(r.get("name", "Recipe"), panel_per, r.get("servings", 1), r.get("serving_weight_g", 0))
                 st.text_area("Nutrition Facts panel text", panel_text, height=260, key=f"saved_panel_{r['name']}")
+                copy_button("📋 Copy Nutrition Facts Panel", panel_text, key=f"copy_saved_{r['name']}")
                 panel_pdf = create_nutrition_facts_pdf(r.get("name", "Recipe"), panel_text)
                 if panel_pdf:
                     st.download_button("Download Nutrition Facts PDF", panel_pdf, file_name=f"{r['name']}_nutrition_facts.pdf", mime="application/pdf")
