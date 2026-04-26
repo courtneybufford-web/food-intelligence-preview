@@ -1124,29 +1124,44 @@ def create_nutrition_facts_png(panel_text, label_size="2 x 4 in", dpi=300):
     return output.getvalue()
 
 
-def image_clipboard_button(png_bytes, key="copy_image"):
-    """Browser-based copy-image button. Works only in browsers that support ClipboardItem."""
+def image_clipboard_tools(png_bytes, key="copy_image"):
+    """Image-copy tools for print-ready label PNG. Browser support varies."""
     if not png_bytes:
         return
     b64 = base64.b64encode(png_bytes).decode("utf-8")
+    data_url = f"data:image/png;base64,{b64}"
     components.html(f"""
-        <button id="{key}" style="background:#0f172a;color:white;border:none;padding:8px 12px;border-radius:6px;font-weight:700;cursor:pointer;">📋 Copy label image</button>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <button id="copy_{key}" style="background:#0f172a;color:white;border:none;padding:8px 12px;border-radius:6px;font-weight:700;cursor:pointer;">
+                📋 Copy image to clipboard
+            </button>
+            <a id="open_{key}" href="{data_url}" target="_blank" style="background:#f3f4f6;color:#111827;text-decoration:none;border:1px solid #d1d5db;padding:8px 12px;border-radius:6px;font-weight:700;">
+                Open PNG in new tab
+            </a>
+            <span id="status_{key}" style="font-size:12px;color:#6b7280;"></span>
+        </div>
         <script>
-        const btn = document.getElementById("{key}");
-        btn.onclick = async () => {{
+        const btn_{key} = document.getElementById("copy_{key}");
+        const status_{key} = document.getElementById("status_{key}");
+        btn_{key}.onclick = async () => {{
             try {{
-                const res = await fetch("data:image/png;base64,{b64}");
+                if (!navigator.clipboard || !window.ClipboardItem) {{
+                    throw new Error("Image clipboard is not supported in this browser/context.");
+                }}
+                const res = await fetch("{data_url}");
                 const blob = await res.blob();
                 await navigator.clipboard.write([new ClipboardItem({{"image/png": blob}})]);
-                btn.innerText = "Copied image!";
-                setTimeout(() => btn.innerText = "📋 Copy label image", 1400);
+                status_{key}.innerText = "Copied PNG image. Paste into Word, PowerPoint, Canva, etc.";
+                btn_{key}.innerText = "✅ Image copied";
+                setTimeout(() => {{ btn_{key}.innerText = "📋 Copy image to clipboard"; }}, 1600);
             }} catch (err) {{
-                btn.innerText = "Copy not supported — use download/right-click";
-                setTimeout(() => btn.innerText = "📋 Copy label image", 2200);
+                status_{key}.innerText = "Browser blocked image copy. Use Open PNG in new tab, then right-click/tap-hold → Copy Image, or Download PNG.";
+                btn_{key}.innerText = "Copy blocked";
+                setTimeout(() => {{ btn_{key}.innerText = "📋 Copy image to clipboard"; }}, 2200);
             }}
         }};
         </script>
-    """, height=45)
+    """, height=72)
 
 
 def create_batch_label_zip(saved_recipes, label_size="2 x 4 in", dpi=300):
@@ -1484,8 +1499,8 @@ with tabs[4]:
         st.subheader("Nutrition Facts Panel Preview")
         render_nutrition_facts_panel(recipe_name or "Recipe", per, servings, serving_weight_g, serving_size_label)
         panel_text = nutrition_facts_panel_text(recipe_name or "Recipe", per, servings, serving_weight_g, serving_size_label)
-        st.text_area("Copy Nutrition Facts panel text", panel_text, height=260)
-        copy_button("📋 Copy Nutrition Facts Panel", panel_text, key="copy_current_panel")
+        st.text_area("Nutrition Facts panel text (optional text copy)", panel_text, height=260)
+        copy_button("📋 Copy panel as text", panel_text, key="copy_current_panel")
 
         panel_pdf = create_nutrition_facts_pdf(recipe_name or "Recipe", panel_text)
         if panel_pdf:
@@ -1498,9 +1513,9 @@ with tabs[4]:
         label_png = create_nutrition_facts_png(panel_text, label_size, label_dpi)
         if label_png:
             st.image(label_png, caption=f"Nutrition Facts label preview — {label_size}, {label_dpi} DPI")
-            image_clipboard_button(label_png, key="copy_current_label_image")
+            image_clipboard_tools(label_png, key="copy_current_label_image")
             st.download_button("Download print-ready PNG label", label_png, file_name=f"{(recipe_name or 'recipe').replace(' ', '_')}_nutrition_facts_{label_dpi}dpi.png", mime="image/png")
-            st.caption("If image copy is blocked by your browser, use Download PNG or right-click/tap-hold the image to copy it.")
+            st.caption("For an actual photo/image paste, use Copy image to clipboard. If your browser blocks it, click Open PNG in new tab and right-click/tap-hold → Copy Image, or download the PNG.")
         else:
             st.warning("PNG label export requires Pillow. Add pillow to requirements.txt.")
 
@@ -1538,7 +1553,7 @@ with tabs[5]:
                 panel_text = r.get("nutrition_facts_panel") or nutrition_facts_panel_text(r.get("name", "Recipe"), panel_per, r.get("servings", 1), r.get("serving_weight_g", 0))
                 render_nutrition_facts_panel(r.get("name", "Recipe"), panel_per, r.get("servings", 1), r.get("serving_weight_g", 0))
                 st.text_area("Nutrition Facts panel text", panel_text, height=260, key=f"saved_panel_{r['name']}")
-                copy_button("📋 Copy Nutrition Facts Panel", panel_text, key=f"copy_saved_{r['name']}")
+                copy_button("📋 Copy panel as text", panel_text, key=f"copy_saved_{r['name']}")
                 panel_pdf = create_nutrition_facts_pdf(r.get("name", "Recipe"), panel_text)
                 if panel_pdf:
                     st.download_button("Download Nutrition Facts PDF", panel_pdf, file_name=f"{r['name']}_nutrition_facts.pdf", mime="application/pdf")
@@ -1548,7 +1563,7 @@ with tabs[5]:
                 saved_png = create_nutrition_facts_png(panel_text, saved_size, saved_dpi)
                 if saved_png:
                     st.image(saved_png, caption=f"Print-ready label — {saved_size}, {saved_dpi} DPI")
-                    image_clipboard_button(saved_png, key=f"copy_saved_label_image_{re.sub(r'[^A-Za-z0-9_]+', '_', r['name'])}")
+                    image_clipboard_tools(saved_png, key=f"copy_saved_label_image_{re.sub(r'[^A-Za-z0-9_]+', '_', r['name'])}")
                     st.download_button("Download print-ready PNG", saved_png, file_name=f"{r['name']}_nutrition_facts_{saved_dpi}dpi.png", mime="image/png")
 
         st.divider()
