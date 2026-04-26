@@ -809,14 +809,14 @@ def create_pdf_export(recipes):
     return output.getvalue()
 
 
-def nutrition_facts_panel_text(recipe_name, per_serving, servings=1, serving_weight_g=0):
+def nutrition_facts_panel_text(recipe_name, per_serving, servings=1, serving_weight_g=0, serving_size_label=None):
     calories = safe_float(per_serving.get("calories", 0))
     fat = safe_float(per_serving.get("fat", 0))
     carbs = safe_float(per_serving.get("carbs", 0))
     protein = safe_float(per_serving.get("protein", 0))
     salt = safe_float(per_serving.get("salt", 0))
     sodium_mg = round(salt * 1000 / 2.5, 0) if salt else 0
-    serving_line = f"{serving_weight_g:g} g" if serving_weight_g else "1 serving"
+    serving_line = serving_size_label or (f"{serving_weight_g:g} g" if serving_weight_g else "1 serving")
     return f"""Nutrition Facts
 {recipe_name}
 Serving size {serving_line}
@@ -845,14 +845,14 @@ Potassium 0mg
 """
 
 
-def render_nutrition_facts_panel(recipe_name, per_serving, servings=1, serving_weight_g=0):
+def render_nutrition_facts_panel(recipe_name, per_serving, servings=1, serving_weight_g=0, serving_size_label=None):
     calories = safe_float(per_serving.get("calories", 0))
     fat = safe_float(per_serving.get("fat", 0))
     carbs = safe_float(per_serving.get("carbs", 0))
     protein = safe_float(per_serving.get("protein", 0))
     salt = safe_float(per_serving.get("salt", 0))
     sodium_mg = round(salt * 1000 / 2.5, 0) if salt else 0
-    serving_line = f"{serving_weight_g:g} g" if serving_weight_g else "1 serving"
+    serving_line = serving_size_label or (f"{serving_weight_g:g} g" if serving_weight_g else "1 serving")
     html = f"""
     <div style="max-width:360px;border:3px solid #111;padding:10px;background:white;color:#111;font-family:Arial, Helvetica, sans-serif;">
         <div style="font-weight:900;font-size:34px;line-height:34px;border-bottom:8px solid #111;">Nutrition Facts</div>
@@ -1204,14 +1204,21 @@ with tabs[4]:
 
         recipe_name = st.text_input("Recipe name")
         servings = st.number_input("Servings", min_value=1, value=1)
+
+        st.markdown("**Serving size**")
+        ss_col1, ss_col2 = st.columns([1, 1])
+        serving_size_value = ss_col1.number_input("Serving size value", min_value=0.0, value=1.0, step=0.25)
+        serving_size_unit = ss_col2.selectbox("Serving size unit", COMMON_UNITS, index=COMMON_UNITS.index("serving") if "serving" in COMMON_UNITS else 0)
+        serving_size_label = f"{serving_size_value:g} {serving_size_unit}" if serving_size_value else "1 serving"
+
         total, allergens, ingredient_list = totals(updated_items)
         per = {k: round(v / servings, 2) for k, v in total.items()}
 
 
         serving_weight_g = round(sum(item_grams(item) for item in updated_items) / max(servings, 1), 2)
         st.subheader("Nutrition Facts Panel Preview")
-        render_nutrition_facts_panel(recipe_name or "Recipe", per, servings, serving_weight_g)
-        panel_text = nutrition_facts_panel_text(recipe_name or "Recipe", per, servings, serving_weight_g)
+        render_nutrition_facts_panel(recipe_name or "Recipe", per, servings, serving_weight_g, serving_size_label)
+        panel_text = nutrition_facts_panel_text(recipe_name or "Recipe", per, servings, serving_weight_g, serving_size_label)
         st.text_area("Copy Nutrition Facts panel text", panel_text, height=260)
 
         panel_pdf = create_nutrition_facts_pdf(recipe_name or "Recipe", panel_text)
@@ -1230,7 +1237,7 @@ with tabs[4]:
         if st.button("Save Recipe"):
             if recipe_name:
                 st.session_state.recipe_items = updated_items
-                st.session_state.saved_recipes.append({"name": recipe_name, "servings": servings, "items": list(updated_items), "label": label, "nutrition_per_serving": per, "nutrition_facts_panel": panel_text, "serving_weight_g": serving_weight_g})
+                st.session_state.saved_recipes.append({"name": recipe_name, "servings": servings, "serving_size_value": serving_size_value, "serving_size_unit": serving_size_unit, "serving_size_label": serving_size_label, "items": list(updated_items), "label": label, "nutrition_per_serving": per, "nutrition_facts_panel": panel_text, "serving_weight_g": serving_weight_g})
                 st.success("Recipe saved")
             else:
                 st.warning("Add a recipe name")
