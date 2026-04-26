@@ -1100,10 +1100,24 @@ with tabs[4]:
             selected_index = display_options.index(selected_label)
             selected_product = normalize_product(results[selected_index])
 
-            st.markdown("#### Selected result")
-            with st.container(border=True):
-                top_cols = st.columns([5.5, 1.4, 1.2])
-                with top_cols[0]:
+            action_cols = st.columns([2, 2, 6])
+            with action_cols[0]:
+                if st.button("+ Add Ingredient", key=f"dropdown_add_{selected_index}_{selected_product['source']}_{selected_product['name']}", use_container_width=True):
+                    item = dict(selected_product)
+                    item["amount"] = 1.0
+                    item["unit"] = "serving"
+                    item["waste_pct"] = 0.0
+                    item["grams"] = item_grams(item)
+                    st.session_state.recipe_items.append(item)
+                    st.success(f"Added {selected_product['name']}")
+                    st.rerun()
+            with action_cols[1]:
+                preview = st.toggle("Preview", key=f"dropdown_preview_{selected_index}_{selected_product['source']}_{selected_product['name']}")
+            with action_cols[2]:
+                st.caption(f"Selected: {selected_product['name']} • {selected_product.get('source', 'Unknown')} • {selected_product.get('calories', 0):g} cal")
+
+            if preview:
+                with st.container(border=True):
                     st.markdown(
                         f"**{selected_product['name']}** &nbsp; {badge_html(selected_product.get('source', 'Customer'))}",
                         unsafe_allow_html=True,
@@ -1111,24 +1125,8 @@ with tabs[4]:
                     st.caption(selected_product.get("serving_note") or f"{selected_product.get('calories', 0):g} cal per serving")
                     if selected_product.get("allergens"):
                         st.warning(f"Allergens: {selected_product.get('allergens')}")
-                with top_cols[1]:
-                    if st.button("+ Add to Recipe", key=f"dropdown_add_{selected_index}_{selected_product['source']}_{selected_product['name']}"):
-                        item = dict(selected_product)
-                        item["amount"] = 1.0
-                        item["unit"] = "serving"
-                        item["waste_pct"] = 0.0
-                        item["grams"] = item_grams(item)
-                        st.session_state.recipe_items.append(item)
-                        st.success(f"Added {selected_product['name']}")
-                        st.rerun()
-                with top_cols[2]:
-                    preview = st.toggle("Preview", key=f"dropdown_preview_{selected_index}_{selected_product['source']}_{selected_product['name']}")
-
-                if preview:
                     st.write("**Ingredients**")
                     st.write(selected_product.get("ingredients", "") or "Not available")
-                    st.write("**Allergens**")
-                    st.write(selected_product.get("allergens", "") or "None detected")
                     st.write("**Nutrition**")
                     st.json({
                         "calories": selected_product.get("calories", 0),
@@ -1209,8 +1207,6 @@ with tabs[4]:
         total, allergens, ingredient_list = totals(updated_items)
         per = {k: round(v / servings, 2) for k, v in total.items()}
 
-        st.subheader("Nutrition per serving")
-        st.json(per)
 
         serving_weight_g = round(sum(item_grams(item) for item in updated_items) / max(servings, 1), 2)
         st.subheader("Nutrition Facts Panel Preview")
