@@ -1,7 +1,7 @@
 streamlit
 pandas
 requests
-pypdf
-python-docx
 openpyxl
 reportlab
+pypdf
+python-docx
