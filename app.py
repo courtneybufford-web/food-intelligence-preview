@@ -1665,14 +1665,16 @@ with tabs[4]:
             item["grams"] = item_grams(item)
             updated_items.append(item)
 
-        c_apply, c_clear = st.columns([1, 1])
-        if c_apply.button("Apply recipe table changes"):
-            st.session_state.recipe_items = updated_items
-            st.success("Recipe items updated.")
-            st.rerun()
-        if c_clear.button("Clear recipe items"):
+        # Keep the recipe state synchronized with the editable table on every rerun.
+        # This makes the Nutrition Facts panel update immediately as quantities,
+        # units, or waste percentages are edited—no separate "Apply" button needed.
+        st.session_state.recipe_items = updated_items
+
+        clear_col, status_col = st.columns([1, 3])
+        if clear_col.button("Clear recipe items"):
             st.session_state.recipe_items = []
             st.rerun()
+        status_col.success("Nutrition Facts panel updates automatically from the current recipe table.")
 
         if any(item_grams(item) == 0 and item.get("unit") in ["each", "piece", "slice", "serving", "portion"] for item in updated_items):
             st.warning("Some count-based units cannot be converted to grams without item-specific weights. Review predominance and nutrition scaling before using labels commercially.")
@@ -1709,8 +1711,14 @@ with tabs[4]:
             custom_serving_weight_g,
         )
 
+        live_cols = st.columns(4)
+        live_cols[0].metric("Recipe calories", f"{round(total.get('calories', 0)):,}")
+        live_cols[1].metric("Label calories", f"{round(per.get('calories', 0)):,}")
+        live_cols[2].metric("Total weight", f"{total_weight_g:g} g")
+        live_cols[3].metric("Serving weight", f"{serving_weight_g:g} g")
+
         st.subheader("Nutrition Facts Panel")
-        st.caption("Locked FDA-style label preview. Values shown use the selected serving option above.")
+        st.caption("Locked FDA-style label preview. Updates automatically from the recipe table and selected serving option above.")
         panel_text = nutrition_facts_panel_text(recipe_name or "Recipe", per, label_servings, serving_weight_g, serving_size_label)
 
         label_size = st.session_state.get("current_label_size", DEFAULT_LABEL_SIZE)
