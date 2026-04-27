@@ -489,16 +489,11 @@ def serving_size_to_grams(value, unit):
     return 0.0
 
 
-def calculate_label_nutrition(total, servings, total_weight_g, serving_option, serving_size_value=1.0, serving_size_unit="serving", custom_serving_weight_g=0.0):
-    """Return nutrition values to show on the label and the label serving text.
+# ============================
+# PATCH: FIX SERVING SIZE BUG
+# ============================
 
-    Important behavior:
-    - Changing servings updates per-serving math.
-    - Changing serving size updates the panel when the selected serving-size unit
-      is weight-based (g, kg, mg, oz, lb).
-    - Volume/count units are label text only unless Custom serving weight is used,
-      because accurate conversion needs density or item-specific weights.
-    """
+def calculate_label_nutrition(total, servings, total_weight_g, serving_option, serving_size_value=1.0, serving_size_unit="serving", custom_serving_weight_g=0.0):
     servings = max(int(servings or 1), 1)
     total_weight_g = safe_float(total_weight_g)
     serving_size_value = safe_float(serving_size_value) or 1.0
@@ -513,21 +508,27 @@ def calculate_label_nutrition(total, servings, total_weight_g, serving_option, s
 
     if serving_option == "Custom serving weight (g)":
         custom_g = safe_float(custom_serving_weight_g)
-        factor = custom_g / total_weight_g if total_weight_g > 0 and custom_g > 0 else 1.0 / servings
+
+        if total_weight_g > 0 and custom_g > 0:
+            factor = custom_g / total_weight_g
+            display_servings = round(total_weight_g / custom_g, 1)
+        else:
+            factor = 1.0 / servings
+            display_servings = servings
+
         label = f"{custom_g:g} g" if custom_g > 0 else f"{serving_size_value:g} {serving_size_unit}"
-        display_servings = round(total_weight_g / custom_g, 1) if total_weight_g > 0 and custom_g > 0 else servings
         return scale_total_nutrition(total, factor), label, display_servings
 
-    # FDA default: per serving. If the user selected a weight-based serving size,
-    # use that as the actual nutrition basis. Otherwise use servings count.
+    # ✅ FIXED LOGIC
     serving_g = serving_size_to_grams(serving_size_value, serving_size_unit)
-    if total_weight_g > 0 and serving_g > 0:
-        factor = serving_g / total_weight_g
-        display_servings = round(total_weight_g / serving_g, 1)
-        return scale_total_nutrition(total, factor), f"{serving_size_value:g} {serving_size_unit}", display_servings
 
-    return scale_total_nutrition(total, 1.0 / servings), f"{serving_size_value:g} {serving_size_unit}", servings
+    if serving_g <= 0:
+        serving_g = total_weight_g / servings if total_weight_g > 0 else 0
 
+    factor = serving_g / total_weight_g if total_weight_g > 0 else 0
+    display_servings = round(total_weight_g / serving_g, 1) if serving_g > 0 else servings
+
+    return scale_total_nutrition(total, factor), f"{serving_size_value:g} {serving_size_unit}", display_servings
 
 def prediction_score(product, query):
     if not query:
